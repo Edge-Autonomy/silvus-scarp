@@ -1,10 +1,36 @@
 import time
 import datetime
 import requests
+import urllib3
 import os
 import logging
 from bs4 import BeautifulSoup
-from pysnmp.hlapi import *
+
+# Suppress InsecureRequestWarning for self-signed certs
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Import pysnmp with fallback for different package versions (pysnmp vs pysnmp-lextudio)
+try:
+    from pysnmp.hlapi import (
+        SnmpEngine, UdpTransportTarget, ContextData,
+        ObjectType, ObjectIdentity, getCmd,
+        CommunityData, UsmUserData,
+        usmHMACSHAAuthProtocol, usmAesCfb128Protocol,
+    )
+    SNMP_AVAILABLE = True
+except ImportError:
+    try:
+        # pysnmp-lextudio uses a different module path
+        from pysnmp.hlapi.v3arch import (
+            SnmpEngine, UdpTransportTarget, ContextData,
+            ObjectType, ObjectIdentity, getCmd,
+            CommunityData, UsmUserData,
+            usmHMACSHAAuthProtocol, usmAesCfb128Protocol,
+        )
+        SNMP_AVAILABLE = True
+    except ImportError:
+        SNMP_AVAILABLE = False
+        logging.getLogger(__name__).warning("pysnmp not available - SNMP queries disabled")
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -39,8 +65,17 @@ SNMP_V3_PRIV_PASS = 'XXXX'
 OID_TEMP = '1.3.6.1.4.1.41728.1.1.1.0'     # streamscapeTemperatureCurrent.0
 OID_VOLT = '1.3.6.1.4.1.41728.1.1.2.0'     # streamscapeVoltageCurrent.0
 
+def ensure_url_scheme(url, default_scheme='http'):
+    """Prepend http:// if no scheme is provided."""
+    if url and not url.startswith(('http://', 'https://')):
+        return f"{default_scheme}://{url}"
+    return url
+
 def get_silvus_telemetry_via_snmp(ip):
     """Query Silvus radio telemetry using SNMP (preferred over web scraping)."""
+    if not SNMP_AVAILABLE:
+        log.warning("SNMP: pysnmp not available, skipping")
+        return None, None
     try:
         if USE_SNMP_V3:
             log.debug(f"SNMP: Querying {ip} via SNMPv3 (user={SNMP_V3_USER})")
@@ -99,17 +134,24 @@ def get_silvus_telemetry_via_web(ip, username, password):
     try:
         # Create a persistent session to maintain login authentication cookies
         session = requests.Session()
+        session.verify = False  # Silvus radios use self-signed certs
         session.headers.update({
             'Cache-Control': 'no-cache, no-store, must-revalidate',
             'Pragma': 'no-cache'
         })
         
         # 1. Authenticate and log into the StreamScape Web server
-        login_url = f"http://{ip}/login.php"  # Target the radio's login endpoint
+        # Try HTTPS first (Silvus often redirects HTTP->HTTPS), fall back to HTTP
         login_payload = {'username': username, 'password': password}
         
+        login_url = f"https://{ip}/login.php"
         log.debug(f"Web: Logging in to {login_url}")
-        login_response = session.post(login_url, data=login_payload, timeout=5.0)
+        try:
+            login_response = session.post(login_url, data=login_payload, timeout=5.0)
+        except requests.exceptions.ConnectionError:
+            login_url = f"http://{ip}/login.php"
+            log.debug(f"Web: HTTPS failed, trying HTTP: {login_url}")
+            login_response = session.post(login_url, data=login_payload, timeout=5.0)
         log.debug(f"Web: Login response status={login_response.status_code}, len={len(login_response.text)}")
         
         # Check if login actually succeeded (look for redirect or session cookie)
@@ -118,7 +160,9 @@ def get_silvus_telemetry_via_web(ip, username, password):
             return None, None
         
         # 2. Grab the live status/diagnostics page where temperature metrics live
-        status_url = f"http://{ip}/status.php"  # Change to 'diagnostics.php' if metrics live there in your FW version
+        # Use same scheme that login succeeded with
+        base_url = login_url.rsplit('/login.php', 1)[0]
+        status_url = f"{base_url}/status.php"  # Change to 'diagnostics.php' if metrics live there in your FW version
         log.debug(f"Web: Fetching status page {status_url}")
         response = session.get(status_url, timeout=5.0)
         
@@ -172,8 +216,10 @@ def get_board_temp(url, label="IPCOMM"):
         return "Not Set"
         
     try:
+        url = ensure_url_scheme(url)
         log.debug(f"{label}: Fetching {url}")
         session = requests.Session()
+        session.verify = False  # Handle self-signed certs
         session.headers.update({
             'Cache-Control': 'no-cache, no-store, must-revalidate',
             'Pragma': 'no-cache',
