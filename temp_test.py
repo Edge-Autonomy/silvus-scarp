@@ -6,10 +6,10 @@ import os
 import logging
 from bs4 import BeautifulSoup
 
-# Suppress InsecureRequestWarning for self-signed certs
+# Self-signing cert to stop complaining
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- LOGGING SETUP ---
+# Logging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -24,36 +24,25 @@ SILVUS_IP = 'XXX'
 IPCOMM1_URL = 'XXX'
 IPCOMM2_URL = ''
 
-# --- SILVUS FIPS / AUTH CONFIGURATION ---
 # FIPS mode enforces: HTTPS only, login authentication required, SSH disabled.
 # If your radio is in FIPS mode, set SILVUS_FIPS_MODE = True.
-# This forces HTTPS and mandatory authentication.
 SILVUS_FIPS_MODE = True
 
 # Login credentials (required when FIPS is on, or when login_auth_disable is 0)
 SILVUS_USER = 'XXX'
 SILVUS_PASS = 'XXX'
 
-
-# =============================================================================
-#  Silvus StreamCaster API Client (JSON-RPC 2.0)
-# =============================================================================
-# Reference: StreamCaster Programming Manual v5.0.1.17
 # API endpoint: POST http://<IP>/streamscape_api
-# All methods return {"result": [...], "id": "...", "jsonrpc": "2.0"} on success.
+
+    # Supports both FIPS and non-FIPS radios:
+    #   - FIPS mode: HTTPS only, login authentication mandatory (Section 13).
+    #   - Non-FIPS: HTTP by default, auth optional.
+
+    # Session cookies are maintained automatically
+    # The cookie refreshes with every API call (10-minute expiry).
+    # If a session expires, the client re-authenticates automatically.
 
 class SilvusAPI:
-    """Thin wrapper around the Silvus StreamCaster JSON-RPC 2.0 API.
-
-    Supports both FIPS and non-FIPS radios:
-      - FIPS mode: HTTPS only, login authentication mandatory (Section 13).
-      - Non-FIPS: HTTP by default, auth optional.
-
-    Session cookies are maintained automatically by requests.Session.
-    The cookie refreshes with every API call (10-minute expiry per Section 9).
-    If a session expires, the client re-authenticates automatically.
-    """
-
     def __init__(self, ip, username=None, password=None, fips_mode=False):
         self.ip = ip
         self.username = username
@@ -262,10 +251,6 @@ class SilvusAPI:
             "battery_pct": self.get_battery_percent(),
         }
 
-
-# =============================================================================
-#  IPCOMM Board Temperature (web scrape - unchanged)
-# =============================================================================
 
 def ensure_url_scheme(url, default_scheme='http'):
     """Prepend http:// if no scheme is provided."""
