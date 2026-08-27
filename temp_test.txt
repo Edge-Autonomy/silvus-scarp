@@ -1,7 +1,18 @@
-[2026-08-27 12:21:17] Silvus: N/A (N/A) | IPCOMM Internal 1: Fetch Error | IPCOMM External 2: Not Set
-[2026-08-27 12:21:54] Silvus: N/A (N/A) | IPCOMM Internal 1: Fetch Error | IPCOMM External 2: Not Set
-[2026-08-27 12:28:15] Silvus: N/A (N/A) | IPCOMM Internal 1: Fetch Error | IPCOMM External 2: Not Set
-[2026-08-27 12:30:09] Silvus: N/A (N/A) | IPCOMM Internal 1: Fetch Error | IPCOMM External 2: Not Set
-[2026-08-27 12:30:23] Silvus: N/A (N/A) | IPCOMM Internal 1: Fetch Error | IPCOMM External 2: Not Set
-[2026-08-27 12:33:54] Silvus: N/A (N/A) | IPCOMM Internal 1: Fetch Error | IPCOMM External 2: Not Set
-[2026-08-27 12:34:01] Silvus: N/A (N/A) | IPCOMM Internal 1: Fetch Error | IPCOMM External 2: Not Set
+/home/slo-elec/Desktop/temp_test_silguh/temp_test.py:7: RuntimeWarning: The 'pysnmp-lextudio' package is deprecated and will be removed in future releases.Please use 'pysnmp' instead.
+  from pysnmp.hlapi import *
+Polling network telemetry loops. Output targeted to /home/slo-elec/Desktop/temp_test.txt...
+Timestamp           | Silvus Temp | Silvus Pwr | IPCOMM Int 1 | IPCOMM Ext 2
+--------------------------------------------------------------------------------
+2026-08-27 13:19:30 [INFO] Querying Silvus radio at 172.18.116.19...
+2026-08-27 13:19:30 [DEBUG] SNMP: Querying 172.18.116.19 via SNMPv2c (community=private)
+2026-08-27 13:19:30 [ERROR] SNMP query to 172.18.116.19 failed: NameError: name 'CommunityData' is not defined
+2026-08-27 13:19:30 [INFO] SNMP returned no data, falling back to web scraping...
+2026-08-27 13:19:30 [DEBUG] Web: Logging in to http://172.18.116.19/login.php
+2026-08-27 13:19:30 [DEBUG] Starting new HTTP connection (1): 172.18.116.19:80
+2026-08-27 13:19:30 [DEBUG] http://172.18.116.19:80 "POST /login.php HTTP/1.1" 307 0
+2026-08-27 13:19:30 [DEBUG] Starting new HTTPS connection (1): 172.18.116.19:443
+2026-08-27 13:19:30 [ERROR] Web: Cannot connect to Silvus at 172.18.116.19: HTTPSConnectionPool(host='172.18.116.19', port=443): Max retries exceeded with url: /login.php (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate (_ssl.c:1000)')))
+2026-08-27 13:19:30 [INFO] Web scrape result: temp=None, volt=None
+2026-08-27 13:19:30 [DEBUG] IPCOMM1: Fetching 10.128.1.1
+2026-08-27 13:19:30 [ERROR] IPCOMM1: Could not parse temperature value: Invalid URL '10.128.1.1': No scheme supplied. Perhaps you meant https://10.128.1.1?
+2026-08-27 13:19:30 | N/A         | N/A        | Parse Error  | Not Set   
