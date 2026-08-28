@@ -45,6 +45,8 @@ Piped or redirected, it falls back to plain one-line-per-poll output with no ANS
 
 Either way each poll appends a plain-text line to `OUTPUT_FILE`, which defaults to `temp_test.txt` next to the script. Override it with the `SILVUS_OUTPUT_FILE` env var.
 
+The same poll also appends a row to `CSV_FILE` — same path with a `.csv` extension, override `SILVUS_CSV_FILE`. Raw values, no units or formatting; missing readings are empty cells. The header is written when the file is created, so an existing CSV keeps appending. Links vary per poll, so they share one `links` column as `src>dst:snr` joined by `;`.
+
 Debug/error chatter goes to `OUTPUT_FILE + '.debug'` (override: `SILVUS_DEBUG_LOG`) so it does not fight the panel for the terminal. `tail -f` it in a second window when something reads N/A.
 
 ## Self-test

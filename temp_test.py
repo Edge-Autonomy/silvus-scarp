@@ -6,6 +6,7 @@ import sys
 import requests
 import urllib3
 import os
+import csv
 import logging
 from bs4 import BeautifulSoup
 
@@ -16,6 +17,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.environ.get('SILVUS_OUTPUT_FILE',
                              os.path.join(_SCRIPT_DIR, 'temp_test.txt'))
+# Machine-readable twin of OUTPUT_FILE; override with SILVUS_CSV_FILE.
+CSV_FILE = os.environ.get('SILVUS_CSV_FILE',
+                          os.path.splitext(OUTPUT_FILE)[0] + '.csv')
 INTERVAL_SECONDS = 60
 
 SILVUS_IP = 'XXX'
@@ -547,6 +551,36 @@ def build_log_entry(timestamp, t, ipcomm1, ipcomm2):
     )
 
 
+CSV_FIELDS = [
+    "timestamp", "temperature_c", "voltage_v", "tx_power_dbm", "tx_power_mw",
+    "battery_pct", "freq_mhz", "bw_mhz", "mcs", "max_speed_mph", "noise_dbm",
+    "uptime", "load_avg", "links", "ipcomm1", "ipcomm2",
+]
+
+
+def build_csv_row(timestamp, t, ipcomm1, ipcomm2):
+    """One row for CSV_FILE: raw values, empty cell for a missing reading."""
+    up, load = parse_uptime(t["uptime"])
+    volts = None if t["voltage_mv"] is None else round(t["voltage_mv"] / 1000, 3)
+    batt = None if t["battery_pct"] is None else round(t["battery_pct"] / 100, 1)
+    # Links vary in count per poll, so they stay one field instead of ragged columns.
+    links = ";".join(f"{s}>{d}:{'' if snr is None else snr}" for s, d, snr in t["links"])
+    row = [timestamp, t["temperature_c"], volts, t["tx_power_dbm"], t["tx_power_mw"],
+           batt, t["freq_mhz"], t["bw_mhz"], t["mcs"], t["max_speed_mph"],
+           t["noise_dbm"], up, load, links, ipcomm1, ipcomm2]
+    return ["" if v is None else v for v in row]
+
+
+def append_csv_row(path, row):
+    """Append one row, writing the header first if the file is new or empty."""
+    new = not os.path.exists(path) or os.path.getsize(path) == 0
+    with open(path, "a", newline="") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(CSV_FIELDS)
+        w.writerow(row)
+
+
 def selftest():
     """Parsing and layout checks. Run with: python temp_test.py --selftest"""
     assert parse_network_status(["22103", "41238", "34", "22103", "22108", "22"]) == [
@@ -589,6 +623,15 @@ def selftest():
     assert "N/A" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
     assert "Links:none" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
 
+    row = build_csv_row("2026-08-28 14:03:12", telem, "91.4°F", "Not Set")
+    assert len(row) == len(CSV_FIELDS)
+    assert row[CSV_FIELDS.index("voltage_v")] == 12.197
+    assert row[CSV_FIELDS.index("battery_pct")] == 65.0
+    assert row[CSV_FIELDS.index("links")] == "22103>41238:34.0"
+    empty_row = build_csv_row("2026-08-28 14:03:12", empty, "N/A", "N/A")
+    assert len(empty_row) == len(CSV_FIELDS)
+    assert empty_row[CSV_FIELDS.index("temperature_c")] == ""
+
     print("selftest ok")
 
 
@@ -597,7 +640,7 @@ def selftest():
 # =============================================================================
 
 def main():
-    for path in (OUTPUT_FILE, DEBUG_LOG_FILE):
+    for path in (OUTPUT_FILE, CSV_FILE, DEBUG_LOG_FILE):
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
     silvus = SilvusAPI(
@@ -614,7 +657,7 @@ def main():
     width = max(64, min(shutil.get_terminal_size((80, 24)).columns, 100))
 
     if not interactive:
-        print(f"Polling network telemetry every {INTERVAL_SECONDS}s. Logging to {OUTPUT_FILE}")
+        print(f"Polling network telemetry every {INTERVAL_SECONDS}s. Logging to {OUTPUT_FILE} and {CSV_FILE}")
         print(f"Silvus data via StreamCaster API at {silvus.api_url}")
 
     while True:
@@ -627,13 +670,15 @@ def main():
         log_entry = build_log_entry(timestamp, telemetry, ipcomm1_temp, ipcomm2_temp)
         with open(OUTPUT_FILE, "a") as f:
             f.write(log_entry)
+        append_csv_row(CSV_FILE, build_csv_row(timestamp, telemetry,
+                                               ipcomm1_temp, ipcomm2_temp))
 
         if interactive:
             panel = build_panel(timestamp, SILVUS_IP, telemetry, max_threshold,
                                 ipcomm1_temp, ipcomm2_temp, width)
             # Home the cursor and clear, so the panel updates in place.
             sys.stdout.write('\033[H\033[J' + panel + '\n')
-            sys.stdout.write(f"{DIM}every {INTERVAL_SECONDS}s → {OUTPUT_FILE}"
+            sys.stdout.write(f"{DIM}every {INTERVAL_SECONDS}s → {OUTPUT_FILE}   csv → {CSV_FILE}"
                              f"   debug → {DEBUG_LOG_FILE}   ctrl-c to quit{RESET}\n")
             sys.stdout.flush()
         else:
