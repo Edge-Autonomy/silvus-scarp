@@ -506,7 +506,8 @@ def get_board_temp(url, label="IPCOMM"):
             if value_cell:
                 raw_text = value_cell.text.strip().replace('deg. F', '').replace('F', '').replace('°', '').strip()
                 log.debug(f"{label}: Raw temp text='{raw_text}'")
-                return f"{float(raw_text):.1f}°F"
+                # Board reports Fahrenheit; display Celsius everywhere.
+                return f"{(float(raw_text) - 32) * 5 / 9:.1f}°C"
             else:
                 log.warning(f"{label}: Found 'Board Temp.' label but no value cell next to it")
                 return "Val Missing"
@@ -620,7 +621,7 @@ def selftest():
              "links": [("22103", "41238", 34.0)]}
     for w in (64, 80, 100):
         out = build_panel("2026-08-28 14:03:12", "172.20.4.31", telem, 85,
-                          "91.4°F", "Not Set", w)
+                          "33.0°C", "Not Set", w)
         for line in out.split('\n'):
             assert visible_len(line) == w, (w, visible_len(line), line)
 
@@ -631,7 +632,7 @@ def selftest():
     assert "N/A" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
     assert "Links:none" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
 
-    row = build_csv_row("2026-08-28 14:03:12", telem, "91.4°F", "Not Set")
+    row = build_csv_row("2026-08-28 14:03:12", telem, "33.0°C", "Not Set")
     assert len(row) == len(CSV_FIELDS)
     assert row[CSV_FIELDS.index("voltage_v")] == 12.197
     assert row[CSV_FIELDS.index("battery_pct")] == 65.0
