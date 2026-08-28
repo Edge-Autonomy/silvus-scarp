@@ -43,9 +43,9 @@ On a TTY this draws a live panel that updates in place, colour-coded: temperatur
 
 Piped or redirected, it falls back to plain one-line-per-poll output with no ANSI.
 
-Either way each poll appends a plain-text line to `OUTPUT_FILE`.
+Either way each poll appends a plain-text line to `OUTPUT_FILE`, which defaults to `temp_test.txt` next to the script. Override it with the `SILVUS_OUTPUT_FILE` env var.
 
-Debug/error chatter goes to `OUTPUT_FILE + '.debug'` so it does not fight the panel for the terminal. `tail -f` it in a second window when something reads N/A.
+Debug/error chatter goes to `OUTPUT_FILE + '.debug'` (override: `SILVUS_DEBUG_LOG`) so it does not fight the panel for the terminal. `tail -f` it in a second window when something reads N/A.
 
 ## Self-test
 

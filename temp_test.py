@@ -12,7 +12,10 @@ from bs4 import BeautifulSoup
 # Self-signing cert to stop complaining
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-OUTPUT_FILE = '/home/slo-elec/Desktop/temp_test.txt'
+# Defaults next to this script; override with SILVUS_OUTPUT_FILE / SILVUS_DEBUG_LOG.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_FILE = os.environ.get('SILVUS_OUTPUT_FILE',
+                             os.path.join(_SCRIPT_DIR, 'temp_test.txt'))
 INTERVAL_SECONDS = 60
 
 SILVUS_IP = 'XXX'
@@ -29,7 +32,7 @@ SILVUS_PASS = 'XXX'
 
 # The live panel owns the terminal, so debug chatter has to go somewhere else.
 # Logs land next to OUTPUT_FILE; tail it in a second terminal when debugging.
-DEBUG_LOG_FILE = OUTPUT_FILE + '.debug'
+DEBUG_LOG_FILE = os.environ.get('SILVUS_DEBUG_LOG', OUTPUT_FILE + '.debug')
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -594,7 +597,8 @@ def selftest():
 # =============================================================================
 
 def main():
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+    for path in (OUTPUT_FILE, DEBUG_LOG_FILE):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
     silvus = SilvusAPI(
         ip=SILVUS_IP,
