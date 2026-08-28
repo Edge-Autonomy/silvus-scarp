@@ -1,5 +1,8 @@
 import time
 import datetime
+import re
+import shutil
+import sys
 import requests
 import urllib3
 import os
@@ -8,14 +11,6 @@ from bs4 import BeautifulSoup
 
 # Self-signing cert to stop complaining
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-log = logging.getLogger(__name__)
 
 OUTPUT_FILE = '/home/slo-elec/Desktop/temp_test.txt'
 INTERVAL_SECONDS = 60
@@ -31,6 +26,19 @@ SILVUS_FIPS_MODE = True
 # Login credentials (required when FIPS is on, or when login_auth_disable is 0)
 SILVUS_USER = 'XXX'
 SILVUS_PASS = 'XXX'
+
+# The live panel owns the terminal, so debug chatter has to go somewhere else.
+# Logs land next to OUTPUT_FILE; tail it in a second terminal when debugging.
+DEBUG_LOG_FILE = OUTPUT_FILE + '.debug'
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    # delay=True: main() creates the directory, so don't open the file at import.
+    handlers=[logging.FileHandler(DEBUG_LOG_FILE, delay=True)],
+)
+log = logging.getLogger(__name__)
 
 # API endpoint: POST http://<IP>/streamscape_api
 
@@ -179,67 +187,85 @@ class SilvusAPI:
 
         return None
 
+    def _read(self, method, cast=str, index=0):
+        """Call a read-only API and cast element `index` of the result array."""
+        result = self._call(method)
+        if not result or len(result) <= index:
+            return None
+        try:
+            return cast(result[index])
+        except (ValueError, TypeError):
+            log.warning(f"Silvus API [{method}]: Could not parse {result[index]!r} as {cast.__name__}")
+            return None
+
     # --- Convenience methods for telemetry data ---
 
     def get_temperature(self):
         """Read current temperature in degrees Celsius (Section 3.21)."""
-        result = self._call("read_current_temperature")
-        if result and len(result) > 0:
-            try:
-                return int(result[0])
-            except (ValueError, TypeError):
-                log.warning(f"Silvus API: Could not parse temperature: {result[0]}")
-        return None
+        return self._read("read_current_temperature", int)
+
+    def get_temp_max_threshold(self):
+        """Read the overheat threshold in C (Section 3.18).
+
+        Above this the radio throttles its duty cycle to 50%, then 25%, so the
+        raw temperature is not interpretable without it.
+        """
+        return self._read("temp_reporting_max_threshold", int)
 
     def get_input_voltage(self):
         """Read input voltage in millivolts (Section 3.119)."""
-        result = self._call("input_voltage_monitoring")
-        if result and len(result) > 0:
-            try:
-                return float(result[0])
-            except (ValueError, TypeError):
-                log.warning(f"Silvus API: Could not parse voltage: {result[0]}")
-        return None
+        return self._read("input_voltage_monitoring", float)
 
     def get_tx_power_dbm(self):
         """Read actual transmitted total output power in dBm (Section 3.58)."""
-        result = self._call("read_power_dBm")
-        if result and len(result) > 0:
-            try:
-                return int(result[0])
-            except (ValueError, TypeError):
-                log.warning(f"Silvus API: Could not parse power dBm: {result[0]}")
-        return None
+        return self._read("read_power_dBm", int)
 
     def get_tx_power_mw(self):
         """Read actual transmitted total output power in mW (Section 3.59)."""
-        result = self._call("read_power_mw")
-        if result and len(result) > 0:
-            try:
-                return int(result[0])
-            except (ValueError, TypeError):
-                log.warning(f"Silvus API: Could not parse power mW: {result[0]}")
-        return None
+        return self._read("read_power_mw", int)
 
     def get_battery_percent(self):
         """Read battery percentage (Section 3.122). Divide by 100 for GUI value."""
-        result = self._call("battery_percent")
-        if result and len(result) > 0:
-            try:
-                return float(result[0])
-            except (ValueError, TypeError):
-                log.warning(f"Silvus API: Could not parse battery: {result[0]}")
-        return None
+        return self._read("battery_percent", float)
 
     def get_node_id(self):
         """Read the radio's unique 20-bit node ID (Section 3.1)."""
-        result = self._call("nodeid")
-        if result and len(result) > 0:
-            return result[0]
-        return None
+        return self._read("nodeid")
+
+    def get_freq_mhz(self):
+        """Read current center frequency in MHz (Section 3.2)."""
+        return self._read("freq", float)
+
+    def get_bandwidth_mhz(self):
+        """Read current channel bandwidth in MHz (Section 3.3)."""
+        return self._read("bw", float)
+
+    def get_mcs(self):
+        """Read the MIMO modulation/coding index (Section 3.14). 255 = auto."""
+        return self._read("mcs", int)
+
+    def get_max_speed_mph(self):
+        """Read the max_speed Doppler setting in mph (Section 3.22)."""
+        return self._read("max_speed", int)
+
+    def get_noise_level_dbm(self):
+        """Read the current noise level in dBm (Section 3.66)."""
+        return self._read("noise_level", int)
+
+    def get_uptime(self):
+        """Read the raw uptime string (Section 3.265)."""
+        return self._read("uptime")
+
+    def get_network_status(self):
+        """Read active routing links (Section 3.32).
+
+        The API returns a flat array of (src, dst, snr) trios; return it as a
+        list of tuples instead.
+        """
+        return parse_network_status(self._call("network_status"))
 
     def get_all_telemetry(self):
-        """Fetch all available telemetry data in one call.
+        """Fetch all available telemetry data in one poll.
 
         Returns a dict with all readings (values may be None if unavailable).
         """
@@ -249,7 +275,180 @@ class SilvusAPI:
             "tx_power_dbm": self.get_tx_power_dbm(),
             "tx_power_mw": self.get_tx_power_mw(),
             "battery_pct": self.get_battery_percent(),
+            "freq_mhz": self.get_freq_mhz(),
+            "bw_mhz": self.get_bandwidth_mhz(),
+            "mcs": self.get_mcs(),
+            "max_speed_mph": self.get_max_speed_mph(),
+            "noise_dbm": self.get_noise_level_dbm(),
+            "uptime": self.get_uptime(),
+            "links": self.get_network_status(),
         }
+
+
+def parse_network_status(result):
+    """Flat ["src","dst","snr",...] array -> [(src, dst, snr_float), ...].
+
+    A trailing partial trio is dropped; a trio with an unparseable SNR is kept
+    with snr=None so the link still shows up on the panel.
+    """
+    links = []
+    if not result:
+        return links
+    for i in range(0, len(result) - 2, 3):
+        src, dst, snr = result[i], result[i + 1], result[i + 2]
+        try:
+            snr = float(snr)
+        except (ValueError, TypeError):
+            snr = None
+        links.append((str(src), str(dst), snr))
+    return links
+
+
+def parse_uptime(raw):
+    """Pull (up_duration, load_1min) out of the uptime string (Section 3.265).
+
+    e.g. "23:51:08 up 2 days, 5:07, 0 users, load average: 1.05, 1.00, 1.02"
+    Either field is None if the string does not match.
+    """
+    if not raw:
+        return None, None
+    up = re.search(r'\bup\s+(.*?),\s*\d+\s+users?', raw)
+    load = re.search(r'load average:\s*([\d.]+)', raw)
+    return (up.group(1).strip() if up else None,
+            float(load.group(1)) if load else None)
+
+
+# =============================================================================
+#  Terminal panel
+# =============================================================================
+
+RESET = '\033[0m'
+DIM = '\033[2m'
+BOLD = '\033[1m'
+GREEN = '\033[32m'
+YELLOW = '\033[33m'
+RED = '\033[31m'
+CYAN = '\033[36m'
+
+ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def visible_len(s):
+    """Length of s as rendered, ignoring ANSI colour escapes."""
+    return len(ANSI_RE.sub('', s))
+
+
+def paint(text, colour):
+    return f"{colour}{text}{RESET}"
+
+
+def temp_colour(temp_c, max_threshold):
+    """Green below the heating band, yellow inside it, red once throttling.
+
+    Section 3.18: the heating band runs from min to max threshold; above max
+    the radio throttles. We only read the max, so approximate the band start
+    as 10 C below it.
+    """
+    if temp_c is None or max_threshold is None:
+        return CYAN
+    if temp_c >= max_threshold:
+        return RED
+    if temp_c >= max_threshold - 10:
+        return YELLOW
+    return GREEN
+
+
+def snr_colour(snr):
+    if snr is None:
+        return DIM
+    if snr < 15:
+        return RED
+    if snr < 25:
+        return YELLOW
+    return GREEN
+
+
+def fmt(value, spec="", suffix="", scale=1.0):
+    """Format a possibly-None reading, falling back to a dim N/A."""
+    if value is None:
+        return paint("N/A", DIM)
+    if scale != 1.0:
+        value = value * scale
+    return f"{value:{spec}}{suffix}"
+
+
+class Panel:
+    """Fixed-size box redrawn in place each poll."""
+
+    def __init__(self, width):
+        self.width = width
+        self.lines = []
+
+    def rule(self, title=None, top=False, bottom=False):
+        left = '╭' if top else ('╰' if bottom else '├')
+        right = '╮' if top else ('╯' if bottom else '┤')
+        if title:
+            bar = f"─ {title} "
+            bar += '─' * max(0, self.width - 2 - visible_len(bar))
+        else:
+            bar = '─' * (self.width - 2)
+        self.lines.append(f"{left}{bar}{right}")
+
+    def row(self, label, body):
+        text = f" {label:<7}{body}"
+        pad = ' ' * max(0, self.width - 2 - visible_len(text))
+        self.lines.append(f"│{text}{pad}│")
+
+    def render(self):
+        return '\n'.join(self.lines)
+
+
+def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width):
+    p = Panel(width)
+    p.rule(f"{BOLD}Silvus {ip}{RESET}  {DIM}{timestamp}{RESET}", top=True)
+
+    mcs = t["mcs"]
+    mcs_str = "auto" if mcs == 255 else (paint("N/A", DIM) if mcs is None else str(mcs))
+    p.row("RF", f"{fmt(t['freq_mhz'], '.1f', ' MHz')}   "
+                f"BW {fmt(t['bw_mhz'], '.0f', ' MHz')}   "
+                f"MCS {mcs_str}   "
+                f"MaxSpd {fmt(t['max_speed_mph'], 'd', ' mph')}")
+
+    temp_c = t["temperature_c"]
+    tcol = temp_colour(temp_c, max_threshold)
+    if temp_c is None or max_threshold is None:
+        state = ""
+    elif temp_c >= max_threshold:
+        state = paint("  THROTTLING", RED)
+    elif temp_c >= max_threshold - 10:
+        state = paint("  HEATING", YELLOW)
+    else:
+        state = paint("  ok", GREEN)
+    p.row("Temp", f"{paint(fmt(temp_c, 'd', ' °C'), tcol)}"
+                  f"   {DIM}limit {fmt(max_threshold, 'd', ' °C')}{RESET}{state}")
+
+    p.row("Power", f"{fmt(t['tx_power_dbm'], 'd', ' dBm')} / {fmt(t['tx_power_mw'], 'd', ' mW')}"
+                   f"   Volt {fmt(t['voltage_mv'], '.2f', ' V', scale=0.001)}"
+                   f"   Batt {fmt(t['battery_pct'], '.1f', ' %', scale=0.01)}")
+
+    up, load = parse_uptime(t["uptime"])
+    p.row("Noise", f"{fmt(t['noise_dbm'], 'd', ' dBm')}"
+                   f"   Up {up or paint('N/A', DIM)}"
+                   f"   Load {fmt(load, '.2f')}")
+
+    p.rule("Mesh links (SNR)")
+    links = t["links"]
+    if links:
+        for src, dst, snr in links:
+            snr_str = paint(fmt(snr, '.0f', ' dB'), snr_colour(snr))
+            p.row("", f"{src} → {dst:<10} {snr_str}")
+    else:
+        p.row("", paint("no active links", DIM))
+
+    p.rule("IPCOMM")
+    p.row("", f"1: {ipcomm1:<14} 2: {ipcomm2}")
+    p.rule(bottom=True)
+    return p.render()
 
 
 def ensure_url_scheme(url, default_scheme='http'):
@@ -290,9 +489,9 @@ def get_board_temp(url, label="IPCOMM"):
         if label_cell:
             value_cell = label_cell.find_next('td')
             if value_cell:
-                raw_text = value_cell.text.strip().replace('deg. F', '').replace('F', '').replace('\u00b0', '').strip()
+                raw_text = value_cell.text.strip().replace('deg. F', '').replace('F', '').replace('°', '').strip()
                 log.debug(f"{label}: Raw temp text='{raw_text}'")
-                return f"{float(raw_text):.1f}\u00b0F"
+                return f"{float(raw_text):.1f}°F"
             else:
                 log.warning(f"{label}: Found 'Board Temp.' label but no value cell next to it")
                 return "Val Missing"
@@ -315,76 +514,137 @@ def get_board_temp(url, label="IPCOMM"):
         return "Fetch Error"
 
 
+def build_log_entry(timestamp, t, ipcomm1, ipcomm2):
+    """One plain-text line for OUTPUT_FILE (no colour, no box)."""
+    def plain(value, spec="", suffix="", scale=1.0):
+        if value is None:
+            return "N/A"
+        if scale != 1.0:
+            value = value * scale
+        return f"{value:{spec}}{suffix}"
+
+    mcs = t["mcs"]
+    mcs_str = "auto" if mcs == 255 else plain(mcs)
+    links = " ".join(f"{s}>{d}:{plain(snr, '.0f')}dB" for s, d, snr in t["links"]) or "none"
+    up, load = parse_uptime(t["uptime"])
+    return (
+        f"[{timestamp}] "
+        f"Silvus: {plain(t['temperature_c'], 'd', 'C')} "
+        f"{plain(t['voltage_mv'], '.2f', 'V', scale=0.001)} "
+        f"TX:{plain(t['tx_power_dbm'], 'd', 'dBm')}/{plain(t['tx_power_mw'], 'd', 'mW')} "
+        f"Batt:{plain(t['battery_pct'], '.1f', '%', scale=0.01)} "
+        f"Freq:{plain(t['freq_mhz'], '.1f', 'MHz')} "
+        f"BW:{plain(t['bw_mhz'], '.0f', 'MHz')} "
+        f"MCS:{mcs_str} "
+        f"MaxSpd:{plain(t['max_speed_mph'], 'd', 'mph')} "
+        f"Noise:{plain(t['noise_dbm'], 'd', 'dBm')} "
+        f"Up:{up or 'N/A'} Load:{plain(load, '.2f')} "
+        f"Links:{links} | "
+        f"IPCOMM1: {ipcomm1} | IPCOMM2: {ipcomm2}\n"
+    )
+
+
+def selftest():
+    """Parsing and layout checks. Run with: python temp_test.py --selftest"""
+    assert parse_network_status(["22103", "41238", "34", "22103", "22108", "22"]) == [
+        ("22103", "41238", 34.0), ("22103", "22108", 22.0)]
+    assert parse_network_status([]) == []
+    assert parse_network_status(None) == []
+    assert parse_network_status(["1", "2"]) == []            # partial trio dropped
+    assert parse_network_status(["1", "2", "x"]) == [("1", "2", None)]
+
+    assert parse_uptime("23:51:08 up 2 days, 5:07, 0 users, load average: 1.05, 1.00, 1.02") \
+        == ("2 days, 5:07", 1.05)
+    assert parse_uptime("10:00:00 up 5 min, 1 user, load average: 0.10, 0.20, 0.30") \
+        == ("5 min", 0.10)
+    assert parse_uptime(None) == (None, None)
+    assert parse_uptime("garbage") == (None, None)
+
+    assert visible_len(paint("abc", RED)) == 3
+    assert temp_colour(40, 85) == GREEN
+    assert temp_colour(80, 85) == YELLOW
+    assert temp_colour(90, 85) == RED
+    assert temp_colour(40, None) == CYAN
+    assert snr_colour(30) == GREEN and snr_colour(20) == YELLOW and snr_colour(5) == RED
+
+    # Every rendered panel line must be exactly `width` visible columns.
+    telem = {"temperature_c": 47, "voltage_mv": 12197.36, "tx_power_dbm": 30,
+             "tx_power_mw": 1000, "battery_pct": 6500.0, "freq_mhz": 2490.0,
+             "bw_mhz": 20.0, "mcs": 255, "max_speed_mph": 30, "noise_dbm": -95,
+             "uptime": "23:51:08 up 2 days, 5:07, 0 users, load average: 1.05, 1.00, 1.02",
+             "links": [("22103", "41238", 34.0)]}
+    for w in (64, 80, 100):
+        out = build_panel("2026-08-28 14:03:12", "172.20.4.31", telem, 85,
+                          "91.4°F", "Not Set", w)
+        for line in out.split('\n'):
+            assert visible_len(line) == w, (w, visible_len(line), line)
+
+    # Missing readings must not crash either renderer.
+    empty = {k: None for k in telem}
+    empty["links"] = []
+    build_panel("2026-08-28 14:03:12", "1.2.3.4", empty, None, "N/A", "N/A", 80)
+    assert "N/A" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
+    assert "Links:none" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
+
+    print("selftest ok")
+
+
 # =============================================================================
 #  Main polling loop
 # =============================================================================
 
-os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+def main():
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
-# Initialize the Silvus API client
-silvus = SilvusAPI(
-    ip=SILVUS_IP,
-    username=SILVUS_USER,
-    password=SILVUS_PASS,
-    fips_mode=SILVUS_FIPS_MODE,
-)
-
-scheme = "HTTPS" if SILVUS_FIPS_MODE else "HTTP"
-print(f"Polling network telemetry every {INTERVAL_SECONDS}s. Logging to {OUTPUT_FILE}")
-print(f"Silvus data via StreamCaster API at {silvus.api_url}")
-if SILVUS_FIPS_MODE:
-    print(f"FIPS mode: HTTPS enforced, login authentication required")
-print()
-print(f"{'Timestamp':<19} | {'Temp':>6} | {'Voltage':>10} | {'TX dBm':>7} | {'TX mW':>7} | {'Batt':>6} | {'IPCOMM1':<12} | {'IPCOMM2':<12}")
-print("-" * 105)
-
-while True:
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 1. Silvus telemetry via StreamCaster API
-    telemetry = silvus.get_all_telemetry()
-
-    temp_c = telemetry["temperature_c"]
-    voltage_mv = telemetry["voltage_mv"]
-    tx_dbm = telemetry["tx_power_dbm"]
-    tx_mw = telemetry["tx_power_mw"]
-    battery = telemetry["battery_pct"]
-
-    # Format display strings
-    temp_str = f"{temp_c}\u00b0C" if temp_c is not None else "N/A"
-
-    if voltage_mv is not None:
-        voltage_v = voltage_mv / 1000.0
-        volt_str = f"{voltage_v:.2f}V"
-    else:
-        volt_str = "N/A"
-
-    dbm_str = f"{tx_dbm}dBm" if tx_dbm is not None else "N/A"
-    mw_str = f"{tx_mw}mW" if tx_mw is not None else "N/A"
-
-    if battery is not None:
-        batt_str = f"{battery / 100.0:.1f}%"
-    else:
-        batt_str = "N/A"
-
-    # 2. IPCOMM Data (Fahrenheit) - still web scraped
-    ipcomm1_temp = get_board_temp(IPCOMM1_URL, label="IPCOMM1")
-    ipcomm2_temp = get_board_temp(IPCOMM2_URL, label="IPCOMM2")
-
-    # Build log line
-    log_entry = (
-        f"[{timestamp}] "
-        f"Silvus: {temp_str} {volt_str} TX:{dbm_str}/{mw_str} Batt:{batt_str} | "
-        f"IPCOMM1: {ipcomm1_temp} | IPCOMM2: {ipcomm2_temp}\n"
+    silvus = SilvusAPI(
+        ip=SILVUS_IP,
+        username=SILVUS_USER,
+        password=SILVUS_PASS,
+        fips_mode=SILVUS_FIPS_MODE,
     )
 
-    # Console output (tabular)
-    print(
-        f"{timestamp} | {temp_str:>6} | {volt_str:>10} | {dbm_str:>7} | {mw_str:>7} | "
-        f"{batt_str:>6} | {ipcomm1_temp:<12} | {ipcomm2_temp:<12}"
-    )
+    # Static for the life of the run; the panel needs it to colour temperature.
+    max_threshold = silvus.get_temp_max_threshold()
 
-    with open(OUTPUT_FILE, "a") as f:
-        f.write(log_entry)
+    interactive = sys.stdout.isatty()
+    width = max(64, min(shutil.get_terminal_size((80, 24)).columns, 100))
 
-    time.sleep(INTERVAL_SECONDS)
+    if not interactive:
+        print(f"Polling network telemetry every {INTERVAL_SECONDS}s. Logging to {OUTPUT_FILE}")
+        print(f"Silvus data via StreamCaster API at {silvus.api_url}")
+
+    while True:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        telemetry = silvus.get_all_telemetry()
+        ipcomm1_temp = get_board_temp(IPCOMM1_URL, label="IPCOMM1")
+        ipcomm2_temp = get_board_temp(IPCOMM2_URL, label="IPCOMM2")
+
+        log_entry = build_log_entry(timestamp, telemetry, ipcomm1_temp, ipcomm2_temp)
+        with open(OUTPUT_FILE, "a") as f:
+            f.write(log_entry)
+
+        if interactive:
+            panel = build_panel(timestamp, SILVUS_IP, telemetry, max_threshold,
+                                ipcomm1_temp, ipcomm2_temp, width)
+            # Home the cursor and clear, so the panel updates in place.
+            sys.stdout.write('\033[H\033[J' + panel + '\n')
+            sys.stdout.write(f"{DIM}every {INTERVAL_SECONDS}s → {OUTPUT_FILE}"
+                             f"   debug → {DEBUG_LOG_FILE}   ctrl-c to quit{RESET}\n")
+            sys.stdout.flush()
+        else:
+            # Piped or redirected: no ANSI, just append the same line we logged.
+            sys.stdout.write(log_entry)
+            sys.stdout.flush()
+
+        time.sleep(INTERVAL_SECONDS)
+
+
+if __name__ == '__main__':
+    if '--selftest' in sys.argv:
+        selftest()
+    else:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print()

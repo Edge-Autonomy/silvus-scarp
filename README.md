@@ -1,14 +1,18 @@
 # Silvus Radio Telemetry Logger
 
-Polls Silvus StreamCaster radios and IPCOMM devices for temperature, voltage, and power data. Logs to a file every 60 seconds.
+Polls Silvus StreamCaster radios and IPCOMM devices for RF, temperature, voltage, and power data. Redraws a live terminal panel and appends a log line every 60 seconds.
 
 ## Data Collected
 
 **Silvus (via StreamCaster JSON-RPC API):**
-- Internal temperature (C)
+- Internal temperature (C) and the overheat threshold it is judged against (§3.18 — above it the radio throttles duty cycle to 50%, then 25%)
 - Input voltage (mV)
 - TX power (dBm and mW)
 - Battery percentage
+- Center frequency, bandwidth, MCS, max_speed (§3.2, 3.3, 3.14, 3.22)
+- Noise level in dBm (§3.66)
+- Uptime and 1-minute load average (§3.265)
+- Active mesh links with per-link SNR (`network_status`, §3.32)
 
 **IPCOMM (via web scrape):**
 - Board temperature (F)
@@ -35,7 +39,21 @@ IPCOMM1_URL = '10.128.1.1'
 python temp_test.py
 ```
 
-Output goes to console and appends to the file defined by `OUTPUT_FILE`.
+On a TTY this draws a live panel that updates in place, colour-coded: temperature against the overheat threshold, link SNR (red <15 dB, yellow <25 dB). Ctrl-C to quit.
+
+Piped or redirected, it falls back to plain one-line-per-poll output with no ANSI.
+
+Either way each poll appends a plain-text line to `OUTPUT_FILE`.
+
+Debug/error chatter goes to `OUTPUT_FILE + '.debug'` so it does not fight the panel for the terminal. `tail -f` it in a second window when something reads N/A.
+
+## Self-test
+
+```
+python temp_test.py --selftest
+```
+
+Checks the `network_status` and `uptime` parsers and asserts every panel line renders to exactly the requested width.
 
 ## FIPS Mode
 
