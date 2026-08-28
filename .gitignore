@@ -1,0 +1,6 @@
+config.py
+__pycache__/
+*.pyc
+temp_test.txt
+temp_test.csv
+*.debug

@@ -21,17 +21,22 @@ Polls Silvus StreamCaster radios and IPCOMM devices for RF, temperature, voltage
 
 ```
 pip install requests beautifulsoup4
+cp config.example.py config.py
 ```
 
-Edit the config at the top of `temp_test.py`:
+Put your IPs and credentials in `config.py`:
 
 ```python
 SILVUS_IP = '172.20.X.X'
 SILVUS_FIPS_MODE = True
 SILVUS_USER = 'admin'
 SILVUS_PASS = 'your_password'
-IPCOMM1_URL = '10.128.1.1'
+IPCOMM1_URL = 'http://10.128.1.1'
 ```
+
+`config.py` is gitignored, so it is written once after cloning and then survives
+every pull without ever landing in a commit. Anything it defines overrides the
+defaults at the top of `temp_test.py`; anything it omits keeps the default.
 
 ## Run
 

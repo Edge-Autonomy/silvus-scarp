@@ -34,6 +34,14 @@ SILVUS_FIPS_MODE = True
 SILVUS_USER = 'XXX'
 SILVUS_PASS = 'XXX'
 
+# Your IPs and credentials live in config.py, which git ignores. Copy
+# config.example.py to config.py once after cloning and edit it there;
+# anything it defines overrides the defaults above.
+try:
+    from config import *  # noqa: F401,F403
+except ImportError:
+    pass
+
 # The live panel owns the terminal, so debug chatter has to go somewhere else.
 # Logs land next to OUTPUT_FILE; tail it in a second terminal when debugging.
 DEBUG_LOG_FILE = os.environ.get('SILVUS_DEBUG_LOG', OUTPUT_FILE + '.debug')
