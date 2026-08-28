@@ -34,6 +34,16 @@ SILVUS_FIPS_MODE = True
 SILVUS_USER = 'XXX'
 SILVUS_PASS = 'XXX'
 
+# Thermal cutout. Above IDLE_TEMP_C the radio is forced idle -- tx_fifo_disable=1
+# (Section 3.33), which stops it initialising any transmission -- and released
+# again once it cools back to IDLE_RESUME_C.
+THERMAL_IDLE = True
+# None: use the radio's own overheat threshold (temp_reporting_max_threshold).
+IDLE_TEMP_C = None
+# None: 5 C below the trip point. The gap is hysteresis; without it the radio
+# flaps in and out of idle every poll while it sits on the threshold.
+IDLE_RESUME_C = None
+
 # Your IPs and credentials live in config.py, which git ignores. Copy
 # config.example.py to config.py once after cloning and edit it there;
 # anything it defines overrides the defaults above.
@@ -219,6 +229,14 @@ class SilvusAPI:
         """Read current temperature in degrees Celsius (Section 3.21)."""
         return self._read("read_current_temperature", int)
 
+    def get_tx_disabled(self):
+        """Read tx_fifo_disable (Section 3.33): 1 = radio cannot transmit."""
+        return self._read("tx_fifo_disable", int)
+
+    def set_tx_disabled(self, disable):
+        """Set tx_fifo_disable (Section 3.33). Returns True if the call landed."""
+        return self._call("tx_fifo_disable", [str(int(disable))]) is not None
+
     def get_temp_max_threshold(self):
         """Read the overheat threshold in C (Section 3.18).
 
@@ -333,6 +351,21 @@ def parse_uptime(raw):
             float(load.group(1)) if load else None)
 
 
+def thermal_action(temp_c, idled, trip_c, resume_c):
+    """Decide the thermal cutout: True = force idle, False = release, None = hold.
+
+    None on a missing reading too -- a poll that failed is not evidence the
+    radio is cool, so an already-idled radio stays idled.
+    """
+    if temp_c is None or trip_c is None:
+        return None
+    if not idled and temp_c >= trip_c:
+        return True
+    if idled and resume_c is not None and temp_c <= resume_c:
+        return False
+    return None
+
+
 # =============================================================================
 #  Terminal panel
 # =============================================================================
@@ -418,7 +451,8 @@ class Panel:
         return '\n'.join(self.lines)
 
 
-def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width):
+def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width,
+                tx_idle=False):
     p = Panel(width)
     p.rule(f"{BOLD}Silvus {ip}{RESET}  {DIM}{timestamp}{RESET}", top=True)
 
@@ -442,6 +476,8 @@ def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width):
     p.row("Temp", f"{paint(fmt(temp_c, 'd', ' °C'), tcol)}"
                   f"   {DIM}limit {fmt(max_threshold, 'd', ' °C')}{RESET}{state}")
 
+    if tx_idle:
+        p.row("TX", paint("FORCED IDLE - too hot, transmit disabled", RED))
     p.row("Power", f"{fmt(t['tx_power_dbm'], 'd', ' dBm')} / {fmt(t['tx_power_mw'], 'd', ' mW')}"
                    f"   Volt {fmt(t['voltage_mv'], '.2f', ' V', scale=0.001)}"
                    f"   Batt {fmt(t['battery_pct'], '.1f', ' %', scale=0.01)}")
@@ -530,7 +566,7 @@ def get_board_temp(url, label="IPCOMM"):
         return "Fetch Error"
 
 
-def build_log_entry(timestamp, t, ipcomm1, ipcomm2):
+def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False):
     """One plain-text line for OUTPUT_FILE (no colour, no box)."""
     def plain(value, spec="", suffix="", scale=1.0):
         if value is None:
@@ -555,7 +591,8 @@ def build_log_entry(timestamp, t, ipcomm1, ipcomm2):
         f"MaxSpd:{plain(t['max_speed_mph'], 'd', 'mph')} "
         f"Noise:{plain(t['noise_dbm'], 'd', 'dBm')} "
         f"Up:{up or 'N/A'} Load:{plain(load, '.2f')} "
-        f"Links:{links} | "
+        f"Links:{links} "
+        f"{'TX:IDLE(thermal) ' if tx_idle else ''}| "
         f"IPCOMM1: {ipcomm1} | IPCOMM2: {ipcomm2}\n"
     )
 
@@ -563,11 +600,11 @@ def build_log_entry(timestamp, t, ipcomm1, ipcomm2):
 CSV_FIELDS = [
     "timestamp", "temperature_c", "voltage_v", "tx_power_dbm", "tx_power_mw",
     "battery_pct", "freq_mhz", "bw_mhz", "mcs", "max_speed_mph", "noise_dbm",
-    "uptime", "load_avg", "links", "ipcomm1", "ipcomm2",
+    "uptime", "load_avg", "links", "ipcomm1", "ipcomm2", "tx_idle",
 ]
 
 
-def build_csv_row(timestamp, t, ipcomm1, ipcomm2):
+def build_csv_row(timestamp, t, ipcomm1, ipcomm2, tx_idle=False):
     """One row for CSV_FILE: raw values, empty cell for a missing reading."""
     up, load = parse_uptime(t["uptime"])
     volts = None if t["voltage_mv"] is None else round(t["voltage_mv"] / 1000, 3)
@@ -576,7 +613,7 @@ def build_csv_row(timestamp, t, ipcomm1, ipcomm2):
     links = ";".join(f"{s}>{d}:{'' if snr is None else snr}" for s, d, snr in t["links"])
     row = [timestamp, t["temperature_c"], volts, t["tx_power_dbm"], t["tx_power_mw"],
            batt, t["freq_mhz"], t["bw_mhz"], t["mcs"], t["max_speed_mph"],
-           t["noise_dbm"], up, load, links, ipcomm1, ipcomm2]
+           t["noise_dbm"], up, load, links, ipcomm1, ipcomm2, int(tx_idle)]
     return ["" if v is None else v for v in row]
 
 
@@ -611,6 +648,15 @@ def selftest():
     assert temp_colour(80, 85) == YELLOW
     assert temp_colour(90, 85) == RED
     assert temp_colour(40, None) == CYAN
+    # Thermal cutout: trip at/above, release at/below, hysteresis in between.
+    assert thermal_action(90, False, 85, 80) is True
+    assert thermal_action(84, False, 85, 80) is None
+    assert thermal_action(82, True, 85, 80) is None     # in the gap, stay idle
+    assert thermal_action(80, True, 85, 80) is False
+    assert thermal_action(90, True, 85, 80) is None     # already idle
+    assert thermal_action(None, True, 85, 80) is None   # failed read: stay idle
+    assert thermal_action(90, False, None, None) is None
+
     assert snr_colour(30) == GREEN and snr_colour(20) == YELLOW and snr_colour(5) == RED
 
     # Every rendered panel line must be exactly `width` visible columns.
@@ -632,11 +678,20 @@ def selftest():
     assert "N/A" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
     assert "Links:none" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
 
+    idle_panel = build_panel("2026-08-28 14:03:12", "172.20.4.31", telem, 85,
+                             "33.0°C", "Not Set", 80, tx_idle=True)
+    for line in idle_panel.split('\n'):
+        assert visible_len(line) == 80, (visible_len(line), line)
+    assert "FORCED IDLE" in idle_panel
+
     row = build_csv_row("2026-08-28 14:03:12", telem, "33.0°C", "Not Set")
     assert len(row) == len(CSV_FIELDS)
     assert row[CSV_FIELDS.index("voltage_v")] == 12.197
     assert row[CSV_FIELDS.index("battery_pct")] == 65.0
     assert row[CSV_FIELDS.index("links")] == "22103>41238:34.0"
+    assert row[CSV_FIELDS.index("tx_idle")] == 0
+    assert build_csv_row("2026-08-28 14:03:12", telem, "a", "b",
+                         tx_idle=True)[CSV_FIELDS.index("tx_idle")] == 1
     empty_row = build_csv_row("2026-08-28 14:03:12", empty, "N/A", "N/A")
     assert len(empty_row) == len(CSV_FIELDS)
     assert empty_row[CSV_FIELDS.index("temperature_c")] == ""
@@ -662,6 +717,15 @@ def main():
     # Static for the life of the run; the panel needs it to colour temperature.
     max_threshold = silvus.get_temp_max_threshold()
 
+    trip_c = IDLE_TEMP_C if IDLE_TEMP_C is not None else max_threshold
+    resume_c = IDLE_RESUME_C if IDLE_RESUME_C is not None else (
+        None if trip_c is None else trip_c - 5)
+    # Start from whatever the radio is already doing, so a restart mid-cutout
+    # does not forget that transmit is off.
+    tx_idle = bool(silvus.get_tx_disabled()) if THERMAL_IDLE else False
+    if THERMAL_IDLE and trip_c is None:
+        log.warning("Thermal idle: no threshold (set IDLE_TEMP_C in config.py); cutout inactive")
+
     interactive = sys.stdout.isatty()
     width = max(64, min(shutil.get_terminal_size((80, 24)).columns, 100))
 
@@ -676,15 +740,27 @@ def main():
         ipcomm1_temp = get_board_temp(IPCOMM1_URL, label="IPCOMM1")
         ipcomm2_temp = get_board_temp(IPCOMM2_URL, label="IPCOMM2")
 
-        log_entry = build_log_entry(timestamp, telemetry, ipcomm1_temp, ipcomm2_temp)
+        if THERMAL_IDLE:
+            want = thermal_action(telemetry["temperature_c"], tx_idle, trip_c, resume_c)
+            if want is not None:
+                if silvus.set_tx_disabled(want):
+                    tx_idle = want
+                    log.warning(f"Thermal idle: transmit {'DISABLED' if want else 'restored'} "
+                                f"at {telemetry['temperature_c']} C "
+                                f"(trip {trip_c} C, resume {resume_c} C)")
+                else:
+                    log.error(f"Thermal idle: failed to set tx_fifo_disable={int(want)}")
+
+        log_entry = build_log_entry(timestamp, telemetry, ipcomm1_temp, ipcomm2_temp,
+                                    tx_idle)
         with open(OUTPUT_FILE, "a") as f:
             f.write(log_entry)
         append_csv_row(CSV_FILE, build_csv_row(timestamp, telemetry,
-                                               ipcomm1_temp, ipcomm2_temp))
+                                               ipcomm1_temp, ipcomm2_temp, tx_idle))
 
         if interactive:
             panel = build_panel(timestamp, SILVUS_IP, telemetry, max_threshold,
-                                ipcomm1_temp, ipcomm2_temp, width)
+                                ipcomm1_temp, ipcomm2_temp, width, tx_idle)
             # Home the cursor and clear, so the panel updates in place.
             sys.stdout.write('\033[H\033[J' + panel + '\n')
             sys.stdout.write(f"{DIM}every {INTERVAL_SECONDS}s → {OUTPUT_FILE}   csv → {CSV_FILE}"

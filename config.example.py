@@ -10,3 +10,9 @@ SILVUS_PASS = 'password'
 
 # Optional:
 # INTERVAL_SECONDS = 60
+
+# Thermal cutout (forces tx_fifo_disable=1 above IDLE_TEMP_C, releases at
+# IDLE_RESUME_C). Defaults: radio's own overheat threshold, trip - 5.
+# THERMAL_IDLE = True
+# IDLE_TEMP_C = 80
+# IDLE_RESUME_C = 70
