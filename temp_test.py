@@ -657,23 +657,25 @@ def get_tc_temp(port, channel, tc_type, offset_c=0.0, label="DATAQ"):
     try:
         with serial.Serial(port, 115200, timeout=1.0) as ser:
             # Short commands take a leading null and no CR; long ones are
-            # space-separated and CR-terminated. (DATAQ's 245SimpleTest2.py
-            # writes a bare b"S1", but the protocol specifies the null and the
-            # device does not echo it, so send it as documented.)
+            # space-separated and CR-terminated. The device accepts these bare
+            # too (DATAQ's 245SimpleTest2.py writes b"S1"), but it echoes the
+            # command either way and never the null, so send it as documented.
             ser.write(b'\x00S0')            # stop, in case a previous run left it scanning
             time.sleep(0.1)
             ser.reset_input_buffer()
             ser.write(f"chn 0 {tc_scan_word(channel, tc_type)}\r".encode())
             ser.write(b'dchn 0\r')          # analog only, so a scan stays two bytes
-            ser.write(b'xrate 1871 10\r')   # 10 Hz burst (SF=79, AF=7)
+            ser.write(b'xrate 1795 200\r')  # 200 Hz burst, so a scan lands in ~5 ms
             time.sleep(0.1)
             ser.reset_input_buffer()
             ser.write(b'\x00S1')
-            # Long enough for several scans at 10 Hz even after the echoed
-            # command bytes have been skipped past.
-            time.sleep(0.5)
-            data = ser.read(ser.in_waiting or 2)
+            # Blocking read: returns as soon as 64 bytes (~32 scans) are in, or
+            # after the port timeout if the device says nothing. Sleeping a
+            # fixed interval instead means guessing how long the first scan
+            # takes, and at low xrate values that guess is wrong.
+            data = ser.read(64)
             ser.write(b'\x00S0')
+
         log.debug(f"{label}: read {len(data)} bytes from {port}")
         temp_c = decode_tc_scan(data, tc_type)
         if temp_c is None:
