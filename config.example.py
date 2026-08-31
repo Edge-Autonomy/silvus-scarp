@@ -20,6 +20,6 @@ SILVUS_PASS = 'password'
 # DATAQ DI-245 thermocouple. Empty port disables it. On Linux the device is
 # usually /dev/ttyUSB0 (see README for the ftdi_sio binding step).
 # DATAQ_PORT = '/dev/ttyUSB0'
-# DATAQ_CHANNEL = 0        # 0-3
+# DATAQ_CHANNEL = 0        # 0-3; the terminal block silkscreen says 1-4
 # DATAQ_TC_TYPE = 'K'      # B E J K N R S T
 # DATAQ_OFFSET_C = 0.0     # calibration trim, added to every reading

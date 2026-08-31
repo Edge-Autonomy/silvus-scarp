@@ -50,7 +50,7 @@ Set in `config.py`:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `DATAQ_PORT` | `''` | serial port; empty disables the DI-245 |
-| `DATAQ_CHANNEL` | `0` | DI-245 analog channel, 0-3 |
+| `DATAQ_CHANNEL` | `0` | DI-245 analog channel, 0-3 (silkscreen 1-4) |
 | `DATAQ_TC_TYPE` | `'K'` | `B E J K N R S T` |
 | `DATAQ_OFFSET_C` | `0.0` | calibration trim, added to every reading |
 
@@ -75,10 +75,14 @@ python temp_test.py --dataq
 DI-245 cannot read its own cold-junction sensor. Both come straight from the
 device. Anything else — `No Data`, `Fetch Error` — is in the debug log.
 
-Verified against a DI-245 (firmware 0x7A): the command set, framing and
-decode are confirmed, using a voltage-mode channel as the live signal. The
-thermocouple path itself is still unconfirmed — no probe was connected at
-the time, and all four channels correctly reported `TC Open`.
+`DATAQ_CHANNEL` is the protocol's numbering, 0-3, but the terminal block is
+silkscreened Channel 1-4. The probe in the block marked Channel 1 is
+`DATAQ_CHANNEL = 0`.
+
+Verified against a DI-245 (firmware 0x7A) with a K-type probe on channel 0:
+30.5-30.8 C over eight consecutive reads, about 0.3 C of spread against the
+type's 0.096 C resolution, tracking the probe as it cooled. Unwired channels
+correctly report `TC Open`.
 
 ## Output
 

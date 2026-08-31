@@ -47,7 +47,7 @@ IDLE_RESUME_C = None
 # DATAQ DI-245 thermocouple, read once per poll. Empty port disables it, the
 # same way an empty IPCOMM2_URL does. Needs pyserial.
 DATAQ_PORT = ''
-DATAQ_CHANNEL = 0        # 0-3, the DI-245's own numbering
+DATAQ_CHANNEL = 0        # 0-3; the terminal block silkscreen says 1-4
 DATAQ_TC_TYPE = 'K'
 # Trim for probe and junction error; added to every reading.
 DATAQ_OFFSET_C = 0.0
