@@ -75,11 +75,11 @@ python temp_test.py --dataq
 DI-245 cannot read its own cold-junction sensor. Both come straight from the
 device. Anything else — `No Data`, `Fetch Error` — is in the debug log.
 
-Untested against real hardware. The protocol document contradicts itself on
-one point (whether to invert the top bit of each reading); the code follows
-the document's coding table, which is the reading that agrees with the
-published per-type temperature ranges. If the first live reading is off by
-roughly 786 °C, it is the other one — say so and it is a one-line change.
+Untested against real hardware. Decoding follows DATAQ's own DI-245 sample,
+[245SimpleTest2.py](https://github.com/dataq-instruments/Python245), which
+agrees with the protocol document's text; the coding table in that same
+document disagrees with both, and is treated as the error. A room-temperature
+probe reading roughly 786 °C off would mean the table was right after all.
 
 ## Output
 

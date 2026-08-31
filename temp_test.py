@@ -622,15 +622,12 @@ def decode_tc_scan(data, tc_type):
     for i in range(len(data) - 2, -1, -1):
         if data[i] & 1 or not data[i + 1] & 1:
             continue
-        counts = (data[i] >> 1) | ((data[i + 1] >> 1) << 7)
-        # Straight 14-bit two's complement, per the protocol's channel coding
-        # table. (The prose above that table says to invert the MSB first; the
-        # table itself does not, and only the table agrees with the documented
-        # per-type temperature ranges.) A wrong choice here shows up as a
-        # constant ~786 C offset, so it is obvious against a room-temperature
-        # probe rather than subtly wrong.
-        if counts >= 0x2000:
-            counts -= 0x4000
+        # Invert the most significant bit and read as two's complement, which
+        # is a plain -0x2000 bias. The protocol's channel coding table shows
+        # this without the inversion, but both the text above that table and
+        # DATAQ's own 245SimpleTest2.py (data<<2 then -32768) apply it, so the
+        # table is the odd one out.
+        counts = ((data[i] >> 1) | ((data[i + 1] >> 1) << 7)) - 0x2000
         if counts == TC_CJC_ERROR:
             return "CJC Error"
         if counts == TC_BURNOUT:
@@ -659,7 +656,11 @@ def get_tc_temp(port, channel, tc_type, offset_c=0.0, label="DATAQ"):
 
     try:
         with serial.Serial(port, 115200, timeout=1.0) as ser:
-            ser.write(b'\x00S0\r')          # stop, in case a previous run left it scanning
+            # Short commands take a leading null and no CR; long ones are
+            # space-separated and CR-terminated. (DATAQ's 245SimpleTest2.py
+            # writes a bare b"S1", but the protocol specifies the null and the
+            # device does not echo it, so send it as documented.)
+            ser.write(b'\x00S0')            # stop, in case a previous run left it scanning
             time.sleep(0.1)
             ser.reset_input_buffer()
             ser.write(f"chn 0 {tc_scan_word(channel, tc_type)}\r".encode())
@@ -667,13 +668,12 @@ def get_tc_temp(port, channel, tc_type, offset_c=0.0, label="DATAQ"):
             ser.write(b'xrate 1871 10\r')   # 10 Hz burst (SF=79, AF=7)
             time.sleep(0.1)
             ser.reset_input_buffer()
-            ser.write(b'\x00S1\r')
+            ser.write(b'\x00S1')
             # Long enough for several scans at 10 Hz even after the echoed
             # command bytes have been skipped past.
             time.sleep(0.5)
             data = ser.read(ser.in_waiting or 2)
-            ser.write(b'\x00S0\r')
-
+            ser.write(b'\x00S0')
         log.debug(f"{label}: read {len(data)} bytes from {port}")
         temp_c = decode_tc_scan(data, tc_type)
         if temp_c is None:
@@ -767,9 +767,10 @@ def selftest():
     assert tc_scan_word(0, 'N') == 5120
     assert tc_scan_word(0, 'K') == 4864
     assert tc_scan_word(3, 'B') == 4099
+
     def scan(counts):
         """Pack signed 14-bit counts the way the DI-245 puts them on the wire."""
-        raw = counts & 0x3FFF
+        raw = (counts + 0x2000) & 0x3FFF
         return bytes([(raw & 0x7F) << 1, (((raw >> 7) & 0x7F) << 1) | 1])
 
     # 0 counts sits at the type's b offset; the extremes are the documented
@@ -778,6 +779,15 @@ def selftest():
     assert round(decode_tc_scan(scan(-8191), 'K')) == -200
     assert round(decode_tc_scan(scan(8190), 'K')) == 1372
     assert round(decode_tc_scan(scan(-5878), 'K'), 1) == 22.0   # room temperature
+    # Agree bit-for-bit with DATAQ's own 245SimpleTest2.py, which assembles a
+    # scan as (b1>>1) + ((b2&254)<<6), shifts left 2 and subtracts 32768.
+    # Skips the two raw values reserved as fault sentinels.
+    for raw in (1, 2314, 8192, 16382):
+        b1, b2 = (raw & 0x7F) << 1, (((raw >> 7) & 0x7F) << 1) | 1
+        dataq_counts = ((((b1 >> 1) + ((b2 & 254) << 6)) << 2) - 32768) // 4
+        m, b = TC_TYPES['J'][1:]
+        assert decode_tc_scan(bytes([b1, b2]), 'J') == m * dataq_counts + b
+
     assert decode_tc_scan(scan(8191), 'K') == "CJC Error"
     assert decode_tc_scan(scan(-8192), 'K') == "TC Open"
     # Echoed command bytes have their LSB set, so they cannot start a scan, and
