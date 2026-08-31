@@ -359,8 +359,24 @@ def parse_uptime(raw):
             float(load.group(1)) if load else None)
 
 
+def hottest(temps):
+    """(label, temp_c) of the hottest reading in {label: temp_c}, ignoring None.
+
+    (None, None) if nothing read. An absent or failed sensor is simply not
+    counted -- an unwired IPCOMM2 must not hold the cutout on forever.
+    """
+    have = [(v, k) for k, v in temps.items() if v is not None]
+    if not have:
+        return None, None
+    v, k = max(have)
+    return k, v
+
+
 def thermal_action(temp_c, idled, trip_c, resume_c):
     """Decide the thermal cutout: True = force idle, False = release, None = hold.
+
+    temp_c is the hottest of every sensor we have -- any one of them over the
+    trip idles the radio, and all of them must be back under resume to release.
 
     None on a missing reading too -- a poll that failed is not evidence the
     radio is cool, so an already-idled radio stays idled.
@@ -816,6 +832,12 @@ def selftest():
     assert thermal_action(90, True, 85, 80) is None     # already idle
     assert thermal_action(None, True, 85, 80) is None   # failed read: stay idle
     assert thermal_action(90, False, None, None) is None
+    # Hottest sensor drives the cutout, whichever one it is.
+    assert hottest({"radio": 70, "tc": 91, "ip": None}) == ("tc", 91)
+    assert hottest({"radio": None, "tc": None}) == (None, None)
+    assert thermal_action(hottest({"radio": 70, "tc": 91})[1], False, 85, 80) is True
+    assert thermal_action(hottest({"radio": 82, "tc": 70})[1], True, 85, 80) is None
+    assert thermal_action(hottest({"radio": 79, "tc": 70})[1], True, 85, 80) is False
 
     assert snr_colour(30) == GREEN and snr_colour(20) == YELLOW and snr_colour(5) == RED
 
@@ -903,12 +925,18 @@ def main():
                               DATAQ_OFFSET_C)
 
         if THERMAL_IDLE:
-            want = thermal_action(telemetry["temperature_c"], tx_idle, trip_c, resume_c)
+            hot_src, hot_c = hottest({
+                "radio": telemetry["temperature_c"],
+                "IPCOMM1": ipcomm1_temp,
+                "IPCOMM2": ipcomm2_temp,
+                "thermocouple": tc_temp,
+            })
+            want = thermal_action(hot_c, tx_idle, trip_c, resume_c)
             if want is not None:
                 if silvus.set_tx_disabled(want):
                     tx_idle = want
                     log.warning(f"Thermal idle: transmit {'DISABLED' if want else 'restored'} "
-                                f"at {telemetry['temperature_c']} C "
+                                f"at {hot_c} C ({hot_src}) "
                                 f"(trip {trip_c} C, resume {resume_c} C)")
                 else:
                     log.error(f"Thermal idle: failed to set tx_fifo_disable={int(want)}")

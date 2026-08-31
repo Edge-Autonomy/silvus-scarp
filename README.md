@@ -41,6 +41,12 @@ yellow <25 dB.
 
 ## Thermal cutout
 
+Every temperature the script reads feeds the cutout — the radio's internal
+sensor, IPCOMM1, IPCOMM2, and the DI-245 thermocouple. The hottest one wins:
+any single sensor at or above the trip idles the radio, and all of them must be
+back at or below the resume temperature before transmit comes back. A sensor
+that is absent or failed to read is skipped, not treated as cool.
+
 At or above the trip temperature the script forces the radio idle —
 `tx_fifo_disable=1`, so it will not initialise any transmission — and restores
 transmit once it cools to the resume temperature. Both transitions are logged
@@ -59,8 +65,8 @@ so a restart mid-cutout does not leave transmit disabled forever.
 ## Thermocouple (DATAQ DI-245)
 
 Optional. One thermocouple channel read once per poll, alongside everything
-else — panel row, log line, CSV `tc` column. It does not drive the thermal
-cutout; that still runs off the radio's own internal temperature.
+else — panel row, log line, CSV `tc` column. It also feeds the thermal cutout,
+like every other temperature.
 
 Set in `config.py`:
 

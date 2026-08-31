@@ -19,8 +19,10 @@ DATAQ_OFFSET_C = 0.0     # calibration trim, added to every reading
 # Optional:
 # INTERVAL_SECONDS = 60
 
-# Thermal cutout (forces tx_fifo_disable=1 above IDLE_TEMP_C, releases at
-# IDLE_RESUME_C). Defaults: radio's own overheat threshold, trip - 5.
+# Thermal cutout (forces tx_fifo_disable=1 when ANY temperature we read --
+# radio, IPCOMM1, IPCOMM2, thermocouple -- goes above IDLE_TEMP_C; releases
+# once all of them are back below IDLE_RESUME_C).
+# Defaults: radio's own overheat threshold, trip - 5.
 # THERMAL_IDLE = True
 # IDLE_TEMP_C = 80
 # IDLE_RESUME_C = 70
