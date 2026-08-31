@@ -8,6 +8,14 @@ SILVUS_FIPS_MODE = True
 SILVUS_USER = 'admin'
 SILVUS_PASS = 'password'
 
+# DATAQ DI-245 thermocouple. Set DATAQ_PORT = '' on a machine that has no
+# DI-245 wired to it. /dev/dataq-di245 is the name setup-di245.sh gives the
+# port; without that script it is /dev/ttyUSB0 and moves around.
+DATAQ_PORT = '/dev/dataq-di245'
+DATAQ_CHANNEL = 0        # 0-3; the terminal block silkscreen says 1-4
+DATAQ_TC_TYPE = 'K'      # B E J K N R S T
+DATAQ_OFFSET_C = 0.0     # calibration trim, added to every reading
+
 # Optional:
 # INTERVAL_SECONDS = 60
 
@@ -16,10 +24,3 @@ SILVUS_PASS = 'password'
 # THERMAL_IDLE = True
 # IDLE_TEMP_C = 80
 # IDLE_RESUME_C = 70
-
-# DATAQ DI-245 thermocouple. Empty port disables it. The port is
-# /dev/dataq-di245 after running setup-di245.sh; see the README.
-# DATAQ_PORT = '/dev/dataq-di245'
-# DATAQ_CHANNEL = 0        # 0-3; the terminal block silkscreen says 1-4
-# DATAQ_TC_TYPE = 'K'      # B E J K N R S T
-# DATAQ_OFFSET_C = 0.0     # calibration trim, added to every reading
