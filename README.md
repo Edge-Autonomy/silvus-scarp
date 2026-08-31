@@ -5,7 +5,7 @@ Polls Silvus radios and IPCOMM devices every 60s. Live panel + logs.
 ## Setup
 
 ```
-pip install requests beautifulsoup4
+pip install requests beautifulsoup4 pyserial
 cp config.example.py config.py
 ```
 
@@ -39,6 +39,48 @@ Set them in `config.py`. `THERMAL_IDLE = False` turns the cutout off and leaves
 the script read-only. On startup it reads the radio's current `tx_fifo_disable`,
 so a restart mid-cutout does not leave transmit disabled forever.
 
+## Thermocouple (DATAQ DI-245)
+
+Optional. One thermocouple channel read once per poll, alongside everything
+else — panel row, log line, CSV `tc` column. It does not drive the thermal
+cutout; that still runs off the radio's own internal temperature.
+
+Set in `config.py`:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `DATAQ_PORT` | `''` | serial port; empty disables the DI-245 |
+| `DATAQ_CHANNEL` | `0` | DI-245 analog channel, 0-3 |
+| `DATAQ_TC_TYPE` | `'K'` | `B E J K N R S T` |
+| `DATAQ_OFFSET_C` | `0.0` | calibration trim, added to every reading |
+
+The DI-245 is an FTDI virtual COM port, but `ftdi_sio` does not claim it by
+default — its VID/PID pair is not in the driver's table. Once per boot:
+
+```
+sudo modprobe ftdi_sio
+echo "0683 2450" | sudo tee /sys/bus/usb-serial/drivers/ftdi_sio/new_id
+```
+
+Replug the DI-245 and it appears as `/dev/ttyUSB0`. Add yourself to the
+`dialout` group (or whatever owns the node) or you get a permission error.
+
+Check the probe without waiting for a poll:
+
+```
+python temp_test.py --dataq
+```
+
+`TC Open` means a broken or disconnected thermocouple, `CJC Error` means the
+DI-245 cannot read its own cold-junction sensor. Both come straight from the
+device. Anything else — `No Data`, `Fetch Error` — is in the debug log.
+
+Untested against real hardware. The protocol document contradicts itself on
+one point (whether to invert the top bit of each reading); the code follows
+the document's coding table, which is the reading that agrees with the
+published per-type temperature ranges. If the first live reading is off by
+roughly 786 °C, it is the other one — say so and it is a one-line change.
+
 ## Output
 
 Three files next to the script:
@@ -50,8 +92,8 @@ Three files next to the script:
 | Debug log | `temp_test.txt.debug` | `SILVUS_DEBUG_LOG` |
 
 CSV appends raw values, empty cells for missing readings. Links share one
-`links` column, `src>dst:snr` joined by `;`. `tx_idle` is 1 while the thermal
-cutout holds transmit off.
+`links` column, `src>dst:snr` joined by `;`. `tc` is the DI-245 thermocouple
+reading. `tx_idle` is 1 while the thermal cutout holds transmit off.
 
 ## When a reading is N/A
 

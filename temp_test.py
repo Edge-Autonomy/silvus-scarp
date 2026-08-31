@@ -44,6 +44,14 @@ IDLE_TEMP_C = None
 # flaps in and out of idle every poll while it sits on the threshold.
 IDLE_RESUME_C = None
 
+# DATAQ DI-245 thermocouple, read once per poll. Empty port disables it, the
+# same way an empty IPCOMM2_URL does. Needs pyserial.
+DATAQ_PORT = ''
+DATAQ_CHANNEL = 0        # 0-3, the DI-245's own numbering
+DATAQ_TC_TYPE = 'K'
+# Trim for probe and junction error; added to every reading.
+DATAQ_OFFSET_C = 0.0
+
 # Your IPs and credentials live in config.py, which git ignores. Copy
 # config.example.py to config.py once after cloning and edit it there;
 # anything it defines overrides the defaults above.
@@ -452,7 +460,7 @@ class Panel:
 
 
 def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width,
-                tx_idle=False):
+                tx_idle=False, tc="Not Set"):
     p = Panel(width)
     p.rule(f"{BOLD}Silvus {ip}{RESET}  {DIM}{timestamp}{RESET}", top=True)
 
@@ -498,6 +506,9 @@ def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width,
 
     p.rule("IPCOMM")
     p.row("", f"1: {ipcomm1:<14} 2: {ipcomm2}")
+
+    p.rule("Thermocouple (DI-245)")
+    p.row("", tc)
     p.rule(bottom=True)
     return p.render()
 
@@ -566,7 +577,119 @@ def get_board_temp(url, label="IPCOMM"):
         return "Fetch Error"
 
 
-def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False):
+# =============================================================================
+#  DATAQ DI-245 thermocouple
+# =============================================================================
+
+# Protocol: DI-245 Communication Protocol rev 1.09 (di-245-protocol.pdf).
+# Virtual COM port, 115200 8N1. Short commands are prefixed with a null byte,
+# long ones are space-separated and terminated with CR.
+
+# chn scan-list word: bits 0-1 channel, bit 12 mode (1 = thermocouple),
+# bits 8-10 pick the type. Mode bit plus the type index below is the whole word
+# for a TC channel.
+TC_TYPES = {
+    #        type index, m, b   -- temperature = m * counts + b
+    'B': (0, 0.095825, 1035),
+    'E': (1, 0.073242, 400),
+    'J': (2, 0.08606, 495),
+    'K': (3, 0.095947, 586),
+    'N': (4, 0.091553, 550),
+    'R': (5, 0.110962, 859),
+    'S': (6, 0.110962, 859),
+    'T': (7, 0.036621, 100),
+}
+
+# Sentinel counts the DI-245 borrows from the measurement range for faults.
+TC_CJC_ERROR = 8191
+TC_BURNOUT = -8192
+
+
+def tc_scan_word(channel, tc_type):
+    """Scan-list value for one thermocouple channel."""
+    return (1 << 12) | (TC_TYPES[tc_type][0] << 8) | channel
+
+
+def decode_tc_scan(data, tc_type):
+    """Latest temperature in C from a one-channel binary stream, or None.
+
+    Each sample is two bytes: bit 0 is the sync flag (cleared on the first byte
+    of a scan, set everywhere else), the remaining 7 bits of each carry the low
+    then high half of a 14-bit signed count.
+    """
+    m, b = TC_TYPES[tc_type][1:]
+    # Walk backwards for the freshest complete scan.
+    for i in range(len(data) - 2, -1, -1):
+        if data[i] & 1 or not data[i + 1] & 1:
+            continue
+        counts = (data[i] >> 1) | ((data[i + 1] >> 1) << 7)
+        # Straight 14-bit two's complement, per the protocol's channel coding
+        # table. (The prose above that table says to invert the MSB first; the
+        # table itself does not, and only the table agrees with the documented
+        # per-type temperature ranges.) A wrong choice here shows up as a
+        # constant ~786 C offset, so it is obvious against a room-temperature
+        # probe rather than subtly wrong.
+        if counts >= 0x2000:
+            counts -= 0x4000
+        if counts == TC_CJC_ERROR:
+            return "CJC Error"
+        if counts == TC_BURNOUT:
+            return "TC Open"
+        return m * counts + b
+    return None
+
+
+def get_tc_temp(port, channel, tc_type, offset_c=0.0, label="DATAQ"):
+    """One thermocouple reading as a display string, mirroring get_board_temp.
+
+    Opens, samples and closes per poll. At a 60s interval that costs nothing
+    and means an unplugged DI-245 recovers by itself on the next poll.
+    """
+    if not port:
+        return "Not Set"
+    try:
+        import serial
+    except ImportError:
+        log.error(f"{label}: pyserial not installed (pip install pyserial)")
+        return "No pyserial"
+
+    if tc_type not in TC_TYPES:
+        log.error(f"{label}: unknown thermocouple type {tc_type!r}")
+        return "Bad TC Type"
+
+    try:
+        with serial.Serial(port, 115200, timeout=1.0) as ser:
+            ser.write(b'\x00S0\r')          # stop, in case a previous run left it scanning
+            time.sleep(0.1)
+            ser.reset_input_buffer()
+            ser.write(f"chn 0 {tc_scan_word(channel, tc_type)}\r".encode())
+            ser.write(b'dchn 0\r')          # analog only, so a scan stays two bytes
+            ser.write(b'xrate 1871 10\r')   # 10 Hz burst (SF=79, AF=7)
+            time.sleep(0.1)
+            ser.reset_input_buffer()
+            ser.write(b'\x00S1\r')
+            # Long enough for several scans at 10 Hz even after the echoed
+            # command bytes have been skipped past.
+            time.sleep(0.5)
+            data = ser.read(ser.in_waiting or 2)
+            ser.write(b'\x00S0\r')
+
+        log.debug(f"{label}: read {len(data)} bytes from {port}")
+        temp_c = decode_tc_scan(data, tc_type)
+        if temp_c is None:
+            log.warning(f"{label}: no complete scan in {len(data)} bytes")
+            return "No Data"
+        if isinstance(temp_c, str):
+            log.warning(f"{label}: {temp_c}")
+            return temp_c
+        return f"{temp_c + offset_c:.1f}°C"
+
+    except Exception as e:
+        # serial.SerialException covers most of it, but an unplug mid-read can
+        # surface as OSError too, and a dead probe must not kill the poll loop.
+        log.error(f"{label}: {type(e).__name__}: {e}")
+        return "Fetch Error"
+def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc="Not Set"):
     """One plain-text line for OUTPUT_FILE (no colour, no box)."""
     def plain(value, spec="", suffix="", scale=1.0):
         if value is None:
@@ -593,6 +716,7 @@ def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False):
         f"Up:{up or 'N/A'} Load:{plain(load, '.2f')} "
         f"Links:{links} "
         f"{'TX:IDLE(thermal) ' if tx_idle else ''}| "
+        f"TC: {tc} | "
         f"IPCOMM1: {ipcomm1} | IPCOMM2: {ipcomm2}\n"
     )
 
@@ -600,11 +724,11 @@ def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False):
 CSV_FIELDS = [
     "timestamp", "temperature_c", "voltage_v", "tx_power_dbm", "tx_power_mw",
     "battery_pct", "freq_mhz", "bw_mhz", "mcs", "max_speed_mph", "noise_dbm",
-    "uptime", "load_avg", "links", "ipcomm1", "ipcomm2", "tx_idle",
+    "uptime", "load_avg", "links", "ipcomm1", "ipcomm2", "tc", "tx_idle",
 ]
 
 
-def build_csv_row(timestamp, t, ipcomm1, ipcomm2, tx_idle=False):
+def build_csv_row(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc="Not Set"):
     """One row for CSV_FILE: raw values, empty cell for a missing reading."""
     up, load = parse_uptime(t["uptime"])
     volts = None if t["voltage_mv"] is None else round(t["voltage_mv"] / 1000, 3)
@@ -613,7 +737,7 @@ def build_csv_row(timestamp, t, ipcomm1, ipcomm2, tx_idle=False):
     links = ";".join(f"{s}>{d}:{'' if snr is None else snr}" for s, d, snr in t["links"])
     row = [timestamp, t["temperature_c"], volts, t["tx_power_dbm"], t["tx_power_mw"],
            batt, t["freq_mhz"], t["bw_mhz"], t["mcs"], t["max_speed_mph"],
-           t["noise_dbm"], up, load, links, ipcomm1, ipcomm2, int(tx_idle)]
+           t["noise_dbm"], up, load, links, ipcomm1, ipcomm2, tc, int(tx_idle)]
     return ["" if v is None else v for v in row]
 
 
@@ -638,6 +762,30 @@ def selftest():
 
     assert parse_uptime("23:51:08 up 2 days, 5:07, 0 users, load average: 1.05, 1.00, 1.02") \
         == ("2 days, 5:07", 1.05)
+
+    # Scan words from the protocol's own "Example chn Commands" table.
+    assert tc_scan_word(0, 'N') == 5120
+    assert tc_scan_word(0, 'K') == 4864
+    assert tc_scan_word(3, 'B') == 4099
+    def scan(counts):
+        """Pack signed 14-bit counts the way the DI-245 puts them on the wire."""
+        raw = counts & 0x3FFF
+        return bytes([(raw & 0x7F) << 1, (((raw >> 7) & 0x7F) << 1) | 1])
+
+    # 0 counts sits at the type's b offset; the extremes are the documented
+    # measurement range for that type (K: -180 to 1360 C).
+    assert decode_tc_scan(scan(0), 'K') == 586
+    assert round(decode_tc_scan(scan(-8191), 'K')) == -200
+    assert round(decode_tc_scan(scan(8190), 'K')) == 1372
+    assert round(decode_tc_scan(scan(-5878), 'K'), 1) == 22.0   # room temperature
+    assert decode_tc_scan(scan(8191), 'K') == "CJC Error"
+    assert decode_tc_scan(scan(-8192), 'K') == "TC Open"
+    # Echoed command bytes have their LSB set, so they cannot start a scan, and
+    # the freshest complete scan wins over an older one.
+    assert decode_tc_scan(b'S1' + scan(0) + scan(-5878), 'K') == \
+        decode_tc_scan(scan(-5878), 'K')
+    assert decode_tc_scan(b'S1', 'K') is None
+    assert decode_tc_scan(b'', 'K') is None
     assert parse_uptime("10:00:00 up 5 min, 1 user, load average: 0.10, 0.20, 0.30") \
         == ("5 min", 0.10)
     assert parse_uptime(None) == (None, None)
@@ -739,6 +887,8 @@ def main():
         telemetry = silvus.get_all_telemetry()
         ipcomm1_temp = get_board_temp(IPCOMM1_URL, label="IPCOMM1")
         ipcomm2_temp = get_board_temp(IPCOMM2_URL, label="IPCOMM2")
+        tc_temp = get_tc_temp(DATAQ_PORT, DATAQ_CHANNEL, DATAQ_TC_TYPE,
+                              DATAQ_OFFSET_C)
 
         if THERMAL_IDLE:
             want = thermal_action(telemetry["temperature_c"], tx_idle, trip_c, resume_c)
@@ -752,15 +902,15 @@ def main():
                     log.error(f"Thermal idle: failed to set tx_fifo_disable={int(want)}")
 
         log_entry = build_log_entry(timestamp, telemetry, ipcomm1_temp, ipcomm2_temp,
-                                    tx_idle)
+                                    tx_idle, tc_temp)
         with open(OUTPUT_FILE, "a") as f:
             f.write(log_entry)
-        append_csv_row(CSV_FILE, build_csv_row(timestamp, telemetry,
-                                               ipcomm1_temp, ipcomm2_temp, tx_idle))
+        append_csv_row(CSV_FILE, build_csv_row(timestamp, telemetry, ipcomm1_temp,
+                                               ipcomm2_temp, tx_idle, tc_temp))
 
         if interactive:
             panel = build_panel(timestamp, SILVUS_IP, telemetry, max_threshold,
-                                ipcomm1_temp, ipcomm2_temp, width, tx_idle)
+                                ipcomm1_temp, ipcomm2_temp, width, tx_idle, tc_temp)
             # Home the cursor and clear, so the panel updates in place.
             sys.stdout.write('\033[H\033[J' + panel + '\n')
             sys.stdout.write(f"{DIM}every {INTERVAL_SECONDS}s → {OUTPUT_FILE}   csv → {CSV_FILE}"
@@ -777,6 +927,10 @@ def main():
 if __name__ == '__main__':
     if '--selftest' in sys.argv:
         selftest()
+    elif '--dataq' in sys.argv:
+        # One reading and quit, for checking the probe and the port without
+        # waiting out a poll. Failures land in the debug log as usual.
+        print(get_tc_temp(DATAQ_PORT, DATAQ_CHANNEL, DATAQ_TC_TYPE, DATAQ_OFFSET_C))
     else:
         try:
             main()
