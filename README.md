@@ -54,16 +54,26 @@ Set in `config.py`:
 | `DATAQ_TC_TYPE` | `'K'` | `B E J K N R S T` |
 | `DATAQ_OFFSET_C` | `0.0` | calibration trim, added to every reading |
 
-The DI-245 is an FTDI virtual COM port, but `ftdi_sio` does not claim it by
-default — its VID/PID pair is not in the driver's table. Once per boot:
+The DI-245 is an FTDI device, but `ftdi_sio` does not claim it — its VID/PID
+pair is not in the driver's table, so the device enumerates and no serial port
+appears. On a new Ubuntu machine, once:
+
+```
+sudo ./setup-di245.sh
+```
+
+That installs a udev rule registering the pair at plug time, names the port
+`/dev/dataq-di245` so it survives a replug into another socket, and adds you
+to `dialout`. Log out and back in for the group to take effect, then replug
+the DI-245 and set `DATAQ_PORT = '/dev/dataq-di245'` in `config.py`.
+
+Without the rule you can do the same by hand, but it lasts only until reboot
+and the port lands on `/dev/ttyUSB0`:
 
 ```
 sudo modprobe ftdi_sio
 echo "0683 2450" | sudo tee /sys/bus/usb-serial/drivers/ftdi_sio/new_id
 ```
-
-Replug the DI-245 and it appears as `/dev/ttyUSB0`. Add yourself to the
-`dialout` group (or whatever owns the node) or you get a permission error.
 
 Check the probe without waiting for a poll:
 
