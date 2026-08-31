@@ -5,9 +5,26 @@ Polls Silvus radios and IPCOMM devices every 60s. Live panel + logs.
 ## Setup
 
 ```
-pip install requests beautifulsoup4 pyserial
+pip install -r requirements.txt
 cp config.example.py config.py
 ```
+
+uv reads the same file. Either make an environment:
+
+```
+uv venv && uv pip install -r requirements.txt
+```
+
+or skip the environment entirely and let uv assemble one per run:
+
+```
+uv run --with-requirements requirements.txt python temp_test.py
+```
+
+(`uv pip install` on its own fails without an active virtualenv.)
+
+`pyserial` is only needed for the DI-245 thermocouple; without it the script
+reports `No pyserial` for that reading and carries on.
 
 Edit `config.py` — radio IP, credentials, IPCOMM URL. It is gitignored: write
 it once, it survives pulls.
