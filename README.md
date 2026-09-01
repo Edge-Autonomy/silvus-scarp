@@ -1,6 +1,8 @@
 # Silvus Radio Telemetry Logger
 
-Polls Silvus radios and IPCOMM devices every 60s. Live panel + logs.
+Polls Silvus radios and IPCOMM devices every 60s, with optional DATAQ DI-245
+thermocouples. Live panel, text log, CSV, and a thermal cutout that idles the
+radio when anything gets too hot.
 
 ## Setup
 
@@ -9,25 +11,17 @@ pip install -r requirements.txt
 cp config.example.py config.py
 ```
 
-uv reads the same file. Either make an environment:
+Or with uv:
 
 ```
 uv venv && uv pip install -r requirements.txt
 ```
 
-or skip the environment entirely and let uv assemble one per run:
+`pyserial` is only needed for the DI-245; without it that reading shows
+`No pyserial` and the rest carries on.
 
-```
-uv run --with-requirements requirements.txt python temp_test.py
-```
-
-(`uv pip install` on its own fails without an active virtualenv.)
-
-`pyserial` is only needed for the DI-245 thermocouple; without it the script
-reports `No pyserial` for that reading and carries on.
-
-Edit `config.py` — radio IP, credentials, IPCOMM URL. It is gitignored: write
-it once, it survives pulls.
+Edit `config.py` — radio IP, credentials, IPCOMM URL. It is gitignored, so it
+survives pulls.
 
 ## Run
 
@@ -41,16 +35,11 @@ yellow <25 dB.
 
 ## Thermal cutout
 
-Every temperature the script reads feeds the cutout — the radio's internal
-sensor, IPCOMM1, IPCOMM2, and the DI-245 thermocouple. The hottest one wins:
-any single sensor at or above the trip idles the radio, and all of them must be
-back at or below the resume temperature before transmit comes back. A sensor
-that is absent or failed to read is skipped, not treated as cool.
-
-At or above the trip temperature the script forces the radio idle —
-`tx_fifo_disable=1`, so it will not initialise any transmission — and restores
-transmit once it cools to the resume temperature. Both transitions are logged
-to the debug log and marked in the text log and the CSV `tx_idle` column.
+Every temperature feeds it — the radio, IPCOMM1, IPCOMM2, and each
+thermocouple. Any one at or above the trip forces the radio idle
+(`tx_fifo_disable=1`); all of them must be back at or below the resume
+temperature before transmit returns. A sensor that is absent or failed to read
+is skipped, not treated as cool.
 
 | Setting | Default |
 | --- | --- |
@@ -58,64 +47,49 @@ to the debug log and marked in the text log and the CSV `tx_idle` column.
 | `IDLE_TEMP_C` | the radio's own overheat threshold |
 | `IDLE_RESUME_C` | trip − 5 °C |
 
-Set them in `config.py`. `THERMAL_IDLE = False` turns the cutout off and leaves
-the script read-only. On startup it reads the radio's current `tx_fifo_disable`,
-so a restart mid-cutout does not leave transmit disabled forever.
+`THERMAL_IDLE = False` turns the cutout off and leaves the script read-only.
+On startup it reads the radio's current `tx_fifo_disable`, so a restart
+mid-cutout does not leave transmit disabled forever.
 
-## Thermocouple (DATAQ DI-245)
+## Thermocouples (DATAQ DI-245)
 
-Optional. One thermocouple channel read once per poll, alongside everything
-else — panel row, log line, CSV `tc` column. It also feeds the thermal cutout,
-like every other temperature.
-
-Set in `config.py`:
+Optional. All configured channels are read once per poll.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `DATAQ_PORT` | `''` | serial port; empty disables the DI-245 |
-| `DATAQ_CHANNEL` | `0` | DI-245 analog channel, 0-3 (silkscreen 1-4) |
-| `DATAQ_TC_TYPE` | `'K'` | `B E J K N R S T` |
+| `DATAQ_CHANNELS` | `[0, 1]` | one per probe; 0-3, silkscreen says 1-4 |
+| `DATAQ_TC_TYPE` | `'K'` | `B E J K N R S T`, same for every channel |
 | `DATAQ_OFFSET_C` | `0.0` | calibration trim, added to every reading |
 
-The DI-245 is an FTDI device, but `ftdi_sio` does not claim it — its VID/PID
-pair is not in the driver's table, so the device enumerates and no serial port
-appears. On a new Ubuntu machine, once:
+Channels are numbered 0-3 but the terminal block is silkscreened 1-4: probes in
+blocks 1 and 2 are `DATAQ_CHANNELS = [0, 1]`, shown as `CH1`, `CH2`. One probe
+only: `[0]`. Type and offset apply to every channel.
+
+`ftdi_sio` does not claim the DI-245, so no serial port appears until the
+VID/PID pair is registered. On Ubuntu, once per machine:
 
 ```
 sudo ./setup-di245.sh
 ```
 
-That installs a udev rule registering the pair at plug time, names the port
-`/dev/dataq-di245` so it survives a replug into another socket, and adds you
-to `dialout`. Log out and back in for the group to take effect, then replug
-the DI-245 and set `DATAQ_PORT = '/dev/dataq-di245'` in `config.py`.
-
-Without the rule you can do the same by hand, but it lasts only until reboot
-and the port lands on `/dev/ttyUSB0`:
+That gives you `/dev/dataq-di245` and adds you to `dialout` — log out and back
+in, replug the DI-245, then set `DATAQ_PORT = '/dev/dataq-di245'`. By hand
+instead (lasts until reboot, port is `/dev/ttyUSB0`):
 
 ```
 sudo modprobe ftdi_sio
 echo "0683 2450" | sudo tee /sys/bus/usb-serial/drivers/ftdi_sio/new_id
 ```
 
-Check the probe without waiting for a poll:
+Check the probes without waiting for a poll:
 
 ```
 python temp_test.py --dataq
 ```
 
-`TC Open` means a broken or disconnected thermocouple, `CJC Error` means the
-DI-245 cannot read its own cold-junction sensor. Both come straight from the
-device. Anything else — `No Data`, `Fetch Error` — is in the debug log.
-
-`DATAQ_CHANNEL` is the protocol's numbering, 0-3, but the terminal block is
-silkscreened Channel 1-4. The probe in the block marked Channel 1 is
-`DATAQ_CHANNEL = 0`.
-
-Verified against a DI-245 (firmware 0x7A) with a K-type probe on channel 0:
-30.5-30.8 C over eight consecutive reads, about 0.3 C of spread against the
-type's 0.096 C resolution, tracking the probe as it cooled. Unwired channels
-correctly report `TC Open`.
+`TC Open` is a broken or disconnected probe, `CJC Error` a cold-junction fault;
+both come from the device. Anything else is in the debug log.
 
 ## Output
 
@@ -128,17 +102,18 @@ Three files next to the script:
 | Debug log | `temp_test.txt.debug` | `SILVUS_DEBUG_LOG` |
 
 CSV appends raw values, empty cells for missing readings. Links share one
-`links` column, `src>dst:snr` joined by `;`. `tc` is the DI-245 thermocouple
-reading. `tx_idle` is 1 while the thermal cutout holds transmit off.
+`links` column, `src>dst:snr` joined by `;`. `tc1`-`tc4` are the DI-245 inputs,
+empty for the ones you do not use. `tx_idle` is 1 while the cutout holds
+transmit off.
 
 ## When a reading is N/A
 
 `tail -f temp_test.txt.debug` in a second window — the failure is in there.
 
-Common causes: wrong IP or credentials in `config.py`; `SILVUS_FIPS_MODE`
-not matching the radio (True forces HTTPS + login, which FIPS radios require).
+Common causes: wrong IP or credentials in `config.py`; `SILVUS_FIPS_MODE` not
+matching the radio (True forces HTTPS + login, which FIPS radios require).
 
-Check the script itself is sane before blaming the network:
+Check the script itself before blaming the network:
 
 ```
 python temp_test.py --selftest
