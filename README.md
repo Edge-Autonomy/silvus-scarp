@@ -34,6 +34,17 @@ Live panel on a TTY, one plain line per poll when piped. Ctrl-C quits.
 Colours: temperature against the overheat threshold, SNR red <15 dB,
 yellow <25 dB.
 
+## Link bandwidth
+
+Each mesh link shows what it actually carried in the last second next to its
+SNR: `3.42Mb/s air21% loss0.5%` — data rate, share of the second spent
+transmitting on that link, and unicast loss (API `link_stats_total_rate`,
+`link_stats_total_air_time`, `link_stats_total_loss`). Air time near 100% means
+the link is saturated, not that the radio is fast.
+
+Only direct neighbours report this, so links the radio does not source show
+SNR alone. Costs three extra API calls per neighbour per poll.
+
 ## Thermal cutout
 
 Every temperature feeds it — the radio, IPCOMM1, IPCOMM2, and each
@@ -103,7 +114,7 @@ Three files next to the script:
 | Debug log | `logs.txt.debug` | `SILVUS_DEBUG_LOG` |
 
 CSV appends raw values, empty cells for missing readings. Links share one
-`links` column, `src>dst:snr` joined by `;`. `ipcomm1` and `ipcomm2` are the
+`links` column, `src>dst:snr:rate_mbps:air_pct:loss_pct` joined by `;`. `ipcomm1` and `ipcomm2` are the
 IPCOMM board temperatures, `Not Set` for an unconfigured URL. `tc1`-`tc4` are
 the DI-245 inputs, empty for the ones you do not use. `tx_idle` is 1 while the
 cutout holds transmit off.

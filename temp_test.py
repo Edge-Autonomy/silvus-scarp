@@ -313,11 +313,41 @@ class SilvusAPI:
         """
         return parse_network_status(self._call("network_status"))
 
+    def get_link_stats(self, nodeid):
+        """Per-neighbour link statistics (Sections 3.149-3.151).
+
+        Rate is the measured Mbps carried by that link over the last second,
+        air time the share of the second spent transmitting on it, loss the
+        unicast data loss percent. Only direct neighbours answer these.
+        """
+        def one(method):
+            result = self._call(method, [str(nodeid)])
+            if not result:
+                return None
+            try:
+                # These come back double-quoted: [ "\"0.3423\"" ].
+                return float(str(result[0]).strip('"'))
+            except (ValueError, TypeError):
+                log.warning(f"Silvus API [{method}]: Could not parse {result[0]!r} as float")
+                return None
+
+        return {
+            "rate_mbps": one("link_stats_total_rate"),
+            "air_pct": one("link_stats_total_air_time"),
+            "loss_pct": one("link_stats_total_loss"),
+        }
+
     def get_all_telemetry(self):
         """Fetch all available telemetry data in one poll.
 
         Returns a dict with all readings (values may be None if unavailable).
         """
+        links = self.get_network_status()
+        node_id = self.get_node_id()
+        # link_stats_* only answer for direct neighbours, i.e. the links this
+        # radio is the source of; the rest of network_status is other hops.
+        link_stats = {dst: self.get_link_stats(dst)
+                      for src, dst, _ in links if src == node_id}
         return {
             "temperature_c": self.get_temperature(),
             "voltage_mv": self.get_input_voltage(),
@@ -330,7 +360,9 @@ class SilvusAPI:
             "max_speed_mph": self.get_max_speed_mph(),
             "noise_dbm": self.get_noise_level_dbm(),
             "uptime": self.get_uptime(),
-            "links": self.get_network_status(),
+            "node_id": node_id,
+            "links": links,
+            "link_stats": link_stats,
         }
 
 
@@ -504,6 +536,20 @@ def tc_summary(tc):
     return "   ".join(f"CH{ch + 1} {v}" for ch, v in sorted(tc.items()))
 
 
+def link_stats_summary(st):
+    """"3.42Mb/s air21% loss0.5%" for one link; "" when nothing was readable."""
+    if not st:
+        return ""
+    bits = []
+    if st.get("rate_mbps") is not None:
+        bits.append(f"{st['rate_mbps']:.2f}Mb/s")
+    if st.get("air_pct") is not None:
+        bits.append(f"air{st['air_pct']:.0f}%")
+    if st.get("loss_pct") is not None:
+        bits.append(f"loss{st['loss_pct']:.1f}%")
+    return " ".join(bits)
+
+
 def build_panel(timestamp, ip, t, max_threshold, ipcomms, width,
                 tx_idle=False, tc=None):
     p = Panel(width)
@@ -540,12 +586,14 @@ def build_panel(timestamp, ip, t, max_threshold, ipcomms, width,
                    f"   Up {up or paint('N/A', DIM)}"
                    f"   Load {fmt(load, '.2f')}")
 
-    p.rule("Mesh links (SNR)")
+    p.rule("Mesh links (SNR, rate, air time, loss)")
     links = t["links"]
+    stats = t.get("link_stats") or {}
     if links:
         for src, dst, snr in links:
             snr_str = paint(fmt(snr, '.0f', ' dB'), snr_colour(snr))
-            p.row("", f"{src} → {dst:<10} {snr_str}")
+            rate = link_stats_summary(stats.get(dst))
+            p.row("", f"{src} → {dst:<10} {snr_str}  {rate}".rstrip())
     else:
         p.row("", paint("no active links", DIM))
 
@@ -762,7 +810,14 @@ def build_log_entry(timestamp, t, ipcomms, tx_idle=False, tc=None):
 
     mcs = t["mcs"]
     mcs_str = "auto" if mcs == 255 else plain(mcs)
-    links = " ".join(f"{s}>{d}:{plain(snr, '.0f')}dB" for s, d, snr in t["links"]) or "none"
+    stats = t.get("link_stats") or {}
+
+    def link_txt(s, d, snr):
+        summary = link_stats_summary(stats.get(d))
+        return (f"{s}>{d}:{plain(snr, '.0f')}dB"
+                + (":" + summary.replace(" ", ":") if summary else ""))
+
+    links = " ".join(link_txt(*link) for link in t["links"]) or "none"
     up, load = parse_uptime(t["uptime"])
     return (
         f"[{timestamp}] "
@@ -798,8 +853,15 @@ def build_csv_row(timestamp, t, ipcomms, tx_idle=False, tc=None):
     up, load = parse_uptime(t["uptime"])
     volts = None if t["voltage_mv"] is None else round(t["voltage_mv"] / 1000, 3)
     batt = None if t["battery_pct"] is None else round(t["battery_pct"] / 100, 1)
-    # Links vary in count per poll, so they stay one field instead of ragged columns.
-    links = ";".join(f"{s}>{d}:{'' if snr is None else snr}" for s, d, snr in t["links"])
+    # Links vary in count per poll, so they stay one field instead of ragged
+    # columns: src>dst:snr:rate_mbps:air_pct:loss_pct, empty for what we lack.
+    stats = t.get("link_stats") or {}
+    link_parts = []
+    for s, d, snr in t["links"]:
+        st = stats.get(d) or {}
+        values = [snr, st.get("rate_mbps"), st.get("air_pct"), st.get("loss_pct")]
+        link_parts.append(f"{s}>{d}:" + ":".join("" if v is None else str(v) for v in values))
+    links = ";".join(link_parts)
     tc = tc or {}
     row = [timestamp, t["temperature_c"], volts, t["tx_power_dbm"], t["tx_power_mw"],
            batt, t["freq_mhz"], t["bw_mhz"], t["mcs"], t["max_speed_mph"],
@@ -909,6 +971,12 @@ def selftest():
     assert thermal_action(hottest({"radio": 82, "tc": 70})[1], True, 85, 80) is None
     assert thermal_action(hottest({"radio": 79, "tc": 70})[1], True, 85, 80) is False
 
+    assert link_stats_summary(None) == "" and link_stats_summary({}) == ""
+    assert link_stats_summary({"rate_mbps": 3.42, "air_pct": 21.0, "loss_pct": 0.5}) \
+        == "3.42Mb/s air21% loss0.5%"
+    # A link the radio answered for only partly still shows what it did give.
+    assert link_stats_summary({"rate_mbps": None, "air_pct": 5.0}) == "air5%"
+
     assert snr_colour(30) == GREEN and snr_colour(20) == YELLOW and snr_colour(5) == RED
 
     # Every rendered panel line must be exactly `width` visible columns.
@@ -916,7 +984,10 @@ def selftest():
              "tx_power_mw": 1000, "battery_pct": 6500.0, "freq_mhz": 2490.0,
              "bw_mhz": 20.0, "mcs": 255, "max_speed_mph": 30, "noise_dbm": -95,
              "uptime": "23:51:08 up 2 days, 5:07, 0 users, load average: 1.05, 1.00, 1.02",
-             "links": [("22103", "41238", 34.0)]}
+             "links": [("22103", "41238", 34.0)],
+             "node_id": "22103",
+             "link_stats": {"41238": {"rate_mbps": 3.42, "air_pct": 21.0,
+                                      "loss_pct": 0.5}}}
     for w in (64, 80, 100):
         out = build_panel("2026-08-28 14:03:12", "172.20.4.31", telem, 85,
                           ["33.0°C", "Not Set"], w,
@@ -931,6 +1002,13 @@ def selftest():
     build_panel("2026-08-28 14:03:12", "1.2.3.4", empty, None, na, 80)
     assert "IPCOMM2: N/A" in build_log_entry("2026-08-28 14:03:12", empty, na)
     assert "Links:none" in build_log_entry("2026-08-28 14:03:12", empty, na)
+    assert "Links:22103>41238:34dB:3.42Mb/s:air21%:loss0.5%" in \
+        build_log_entry("2026-08-28 14:03:12", telem, na)
+    # No stats for a link (not a neighbour, or the read failed) drops the suffix.
+    no_stats = dict(telem, link_stats={})
+    assert "Links:22103>41238:34dB " in build_log_entry("2026-08-28 14:03:12", no_stats, na)
+    assert build_csv_row("2026-08-28 14:03:12", no_stats, na)[CSV_FIELDS.index("links")] \
+        == "22103>41238:34.0:::"
 
     idle_panel = build_panel("2026-08-28 14:03:12", "172.20.4.31", telem, 85,
                              ["33.0°C", "Not Set"], 80, tx_idle=True)
@@ -947,7 +1025,7 @@ def selftest():
     assert row[CSV_FIELDS.index("tc4")] == "TC Open"
     assert row[CSV_FIELDS.index("voltage_v")] == 12.197
     assert row[CSV_FIELDS.index("battery_pct")] == 65.0
-    assert row[CSV_FIELDS.index("links")] == "22103>41238:34.0"
+    assert row[CSV_FIELDS.index("links")] == "22103>41238:34.0:3.42:21.0:0.5"
     assert row[CSV_FIELDS.index("tx_idle")] == 0
     assert build_csv_row("2026-08-28 14:03:12", telem, ["a", "b"],
                          tx_idle=True)[CSV_FIELDS.index("tx_idle")] == 1
