@@ -16,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Defaults next to this script; override with SILVUS_OUTPUT_FILE / SILVUS_DEBUG_LOG.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.environ.get('SILVUS_OUTPUT_FILE',
-                             os.path.join(_SCRIPT_DIR, 'temp_test.txt'))
+                             os.path.join(_SCRIPT_DIR, 'logs.txt'))
 # Machine-readable twin of OUTPUT_FILE; override with SILVUS_CSV_FILE.
 CSV_FILE = os.environ.get('SILVUS_CSV_FILE',
                           os.path.splitext(OUTPUT_FILE)[0] + '.csv')

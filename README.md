@@ -98,9 +98,9 @@ Three files next to the script:
 
 | File | Default | Override |
 | --- | --- | --- |
-| Text log | `temp_test.txt` | `SILVUS_OUTPUT_FILE` |
-| CSV | `temp_test.csv` | `SILVUS_CSV_FILE` |
-| Debug log | `temp_test.txt.debug` | `SILVUS_DEBUG_LOG` |
+| Text log | `logs.txt` | `SILVUS_OUTPUT_FILE` |
+| CSV | `logs.csv` | `SILVUS_CSV_FILE` |
+| Debug log | `logs.txt.debug` | `SILVUS_DEBUG_LOG` |
 
 CSV appends raw values, empty cells for missing readings. Links share one
 `links` column, `src>dst:snr` joined by `;`. `ipcomm1` and `ipcomm2` are the
@@ -110,7 +110,7 @@ cutout holds transmit off.
 
 ## When a reading is N/A
 
-`tail -f temp_test.txt.debug` in a second window — the failure is in there.
+`tail -f logs.txt.debug` in a second window — the failure is in there.
 
 Common causes: wrong IP or credentials in `config.py`; `SILVUS_FIPS_MODE` not
 matching the radio (True forces HTTPS + login, which FIPS radios require).
