@@ -12,8 +12,8 @@ SILVUS_PASS = 'password'
 # DI-245 wired to it. /dev/dataq-di245 is the name setup-di245.sh gives the
 # port; without that script it is /dev/ttyUSB0 and moves around.
 DATAQ_PORT = '/dev/dataq-di245'
-DATAQ_CHANNEL = 0        # 0-3; the terminal block silkscreen says 1-4
-DATAQ_TC_TYPE = 'K'      # B E J K N R S T
+DATAQ_CHANNELS = [0, 1]  # one per probe; 0-3, the silkscreen says 1-4
+DATAQ_TC_TYPE = 'K'      # B E J K N R S T; same for every channel
 DATAQ_OFFSET_C = 0.0     # calibration trim, added to every reading
 
 # Optional:

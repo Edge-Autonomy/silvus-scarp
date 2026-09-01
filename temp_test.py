@@ -47,8 +47,10 @@ IDLE_RESUME_C = None
 # DATAQ DI-245 thermocouple, read once per poll. Empty port disables it, the
 # same way an empty IPCOMM2_URL does. Needs pyserial.
 DATAQ_PORT = ''
-DATAQ_CHANNEL = 0        # 0-3; the terminal block silkscreen says 1-4
-DATAQ_TC_TYPE = 'K'
+# One entry per probe, read in the same scan. 0-3; the silkscreen says 1-4.
+DATAQ_CHANNELS = [0, 1]
+DATAQ_TC_TYPE = 'K'      # all channels; the DI-245 allows a type per channel,
+                         # but every probe here is the same kind.
 # Trim for probe and junction error; added to every reading.
 DATAQ_OFFSET_C = 0.0
 
@@ -359,13 +361,27 @@ def parse_uptime(raw):
             float(load.group(1)) if load else None)
 
 
+def as_c(value):
+    """Degrees C from a reading, or None if it is not one.
+
+    Sensor readers hand back display strings ("47.0°C") or a status word
+    ("Not Set", "TC Open"); the cutout needs the number or nothing.
+    """
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        return float(str(value).rstrip("°C"))
+    except (TypeError, ValueError):
+        return None
+
+
 def hottest(temps):
     """(label, temp_c) of the hottest reading in {label: temp_c}, ignoring None.
 
     (None, None) if nothing read. An absent or failed sensor is simply not
     counted -- an unwired IPCOMM2 must not hold the cutout on forever.
     """
-    have = [(v, k) for k, v in temps.items() if v is not None]
+    have = [(c, k) for k, v in temps.items() if (c := as_c(v)) is not None]
     if not have:
         return None, None
     v, k = max(have)
@@ -475,8 +491,15 @@ class Panel:
         return '\n'.join(self.lines)
 
 
+def tc_summary(tc):
+    """Thermocouple readings on one line: "CH1 22.3°C   CH2 24.0°C"."""
+    if not tc:
+        return "Not Set"
+    return "   ".join(f"CH{ch + 1} {v}" for ch, v in sorted(tc.items()))
+
+
 def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width,
-                tx_idle=False, tc="Not Set"):
+                tx_idle=False, tc=None):
     p = Panel(width)
     p.rule(f"{BOLD}Silvus {ip}{RESET}  {DIM}{timestamp}{RESET}", top=True)
 
@@ -523,8 +546,8 @@ def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width,
     p.rule("IPCOMM")
     p.row("", f"1: {ipcomm1:<14} 2: {ipcomm2}")
 
-    p.rule("Thermocouple (DI-245)")
-    p.row("", tc)
+    p.rule("Thermocouples (DI-245)")
+    p.row("", tc_summary(tc))
     p.rule(bottom=True)
     return p.render()
 
@@ -626,49 +649,56 @@ def tc_scan_word(channel, tc_type):
     return (1 << 12) | (TC_TYPES[tc_type][0] << 8) | channel
 
 
-def decode_tc_scan(data, tc_type):
-    """Latest temperature in C from a one-channel binary stream, or None.
+def decode_tc_scan(data, tc_type, count=1):
+    """Latest scan as a list of `count` temperatures in C, or None.
 
     Each sample is two bytes: bit 0 is the sync flag (cleared on the first byte
     of a scan, set everywhere else), the remaining 7 bits of each carry the low
-    then high half of a 14-bit signed count.
+    then high half of a 14-bit signed count. A scan holds one sample per
+    channel in the scan list, in scan-list order.
     """
     m, b = TC_TYPES[tc_type][1:]
+    size = 2 * count
     # Walk backwards for the freshest complete scan.
-    for i in range(len(data) - 2, -1, -1):
-        if data[i] & 1 or not data[i + 1] & 1:
+    for i in range(len(data) - size, -1, -1):
+        # Sync: first byte of the scan clear, every other byte of it set.
+        if data[i] & 1 or not all(data[i + j] & 1 for j in range(1, size)):
             continue
-        # Invert the most significant bit and read as two's complement, which
-        # is a plain -0x2000 bias. The protocol's channel coding table shows
-        # this without the inversion, but both the text above that table and
-        # DATAQ's own 245SimpleTest2.py (data<<2 then -32768) apply it, so the
-        # table is the odd one out.
-        counts = ((data[i] >> 1) | ((data[i + 1] >> 1) << 7)) - 0x2000
-        if counts == TC_CJC_ERROR:
-            return "CJC Error"
-        if counts == TC_BURNOUT:
-            return "TC Open"
-        return m * counts + b
+        scan = []
+        for j in range(0, size, 2):
+            # Invert the most significant bit and read as two's complement,
+            # which is a plain -0x2000 bias. The protocol's channel coding
+            # table shows this without the inversion, but both the text above
+            # that table and DATAQ's own 245SimpleTest2.py (data<<2 then
+            # -32768) apply it, so the table is the odd one out.
+            counts = ((data[i + j] >> 1) | ((data[i + j + 1] >> 1) << 7)) - 0x2000
+            scan.append("CJC Error" if counts == TC_CJC_ERROR else
+                        "TC Open" if counts == TC_BURNOUT else m * counts + b)
+        return scan
     return None
 
 
-def get_tc_temp(port, channel, tc_type, offset_c=0.0, label="DATAQ"):
-    """One thermocouple reading as a display string, mirroring get_board_temp.
+def get_tc_temps(port, channels, tc_type, offset_c=0.0, label="DATAQ"):
+    """{channel: display string} for every configured probe, one scan for all.
 
-    Opens, samples and closes per poll. At a 60s interval that costs nothing
-    and means an unplugged DI-245 recovers by itself on the next poll.
+    Mirrors get_board_temp: never raises, a failure is a status word instead of
+    a number. Opens, samples and closes per poll. At a 60s interval that costs
+    nothing and means an unplugged DI-245 recovers by itself on the next poll.
     """
-    if not port:
-        return "Not Set"
+    def every(value):
+        return {ch: value for ch in channels}
+
+    if not port or not channels:
+        return every("Not Set")
     try:
         import serial
     except ImportError:
         log.error(f"{label}: pyserial not installed (pip install pyserial)")
-        return "No pyserial"
+        return every("No pyserial")
 
     if tc_type not in TC_TYPES:
         log.error(f"{label}: unknown thermocouple type {tc_type!r}")
-        return "Bad TC Type"
+        return every("Bad TC Type")
 
     try:
         with serial.Serial(port, 115200, timeout=1.0) as ser:
@@ -679,35 +709,43 @@ def get_tc_temp(port, channel, tc_type, offset_c=0.0, label="DATAQ"):
             ser.write(b'\x00S0')            # stop, in case a previous run left it scanning
             time.sleep(0.1)
             ser.reset_input_buffer()
-            ser.write(f"chn 0 {tc_scan_word(channel, tc_type)}\r".encode())
-            ser.write(b'dchn 0\r')          # analog only, so a scan stays two bytes
+            # Scan-list slot per probe; the DI-245 then samples them in order.
+            for slot, ch in enumerate(channels):
+                ser.write(f"chn {slot} {tc_scan_word(ch, tc_type)}\r".encode())
+            ser.write(b'dchn 0\r')          # analog only, no digital word in the scan
             ser.write(b'xrate 1795 200\r')  # 200 Hz burst, so a scan lands in ~5 ms
             time.sleep(0.1)
             ser.reset_input_buffer()
             ser.write(b'\x00S1')
-            # Blocking read: returns as soon as 64 bytes (~32 scans) are in, or
-            # after the port timeout if the device says nothing. Sleeping a
-            # fixed interval instead means guessing how long the first scan
-            # takes, and at low xrate values that guess is wrong.
-            data = ser.read(64)
+            # Blocking read: returns as soon as the buffer is full (32 scans,
+            # whatever the channel count), or after the port timeout if the
+            # device says nothing. Sleeping a fixed interval instead means
+            # guessing how long the first scan takes, and at low xrate values
+            # that guess is wrong.
+            data = ser.read(64 * len(channels))
             ser.write(b'\x00S0')
 
         log.debug(f"{label}: read {len(data)} bytes from {port}")
-        temp_c = decode_tc_scan(data, tc_type)
-        if temp_c is None:
+        scan = decode_tc_scan(data, tc_type, len(channels))
+        if scan is None:
             log.warning(f"{label}: no complete scan in {len(data)} bytes")
-            return "No Data"
-        if isinstance(temp_c, str):
-            log.warning(f"{label}: {temp_c}")
-            return temp_c
-        return f"{temp_c + offset_c:.1f}°C"
+            return every("No Data")
+
+        out = {}
+        for ch, temp_c in zip(channels, scan):
+            if isinstance(temp_c, str):          # CJC Error / TC Open
+                log.warning(f"{label} ch{ch + 1}: {temp_c}")
+                out[ch] = temp_c
+            else:
+                out[ch] = f"{temp_c + offset_c:.1f}°C"
+        return out
 
     except Exception as e:
         # serial.SerialException covers most of it, but an unplug mid-read can
         # surface as OSError too, and a dead probe must not kill the poll loop.
         log.error(f"{label}: {type(e).__name__}: {e}")
-        return "Fetch Error"
-def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc="Not Set"):
+        return every("Fetch Error")
+def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc=None):
     """One plain-text line for OUTPUT_FILE (no colour, no box)."""
     def plain(value, spec="", suffix="", scale=1.0):
         if value is None:
@@ -734,7 +772,7 @@ def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc="Not Set")
         f"Up:{up or 'N/A'} Load:{plain(load, '.2f')} "
         f"Links:{links} "
         f"{'TX:IDLE(thermal) ' if tx_idle else ''}| "
-        f"TC: {tc} | "
+        f"TC: {tc_summary(tc)} | "
         f"IPCOMM1: {ipcomm1} | IPCOMM2: {ipcomm2}\n"
     )
 
@@ -742,20 +780,25 @@ def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc="Not Set")
 CSV_FIELDS = [
     "timestamp", "temperature_c", "voltage_v", "tx_power_dbm", "tx_power_mw",
     "battery_pct", "freq_mhz", "bw_mhz", "mcs", "max_speed_mph", "noise_dbm",
-    "uptime", "load_avg", "links", "ipcomm1", "ipcomm2", "tc", "tx_idle",
+    "uptime", "load_avg", "links", "ipcomm1", "ipcomm2",
+    # One column per DI-245 input, always all four, so the header does not
+    # move when DATAQ_CHANNELS changes. Unused inputs stay empty.
+    "tc1", "tc2", "tc3", "tc4", "tx_idle",
 ]
 
 
-def build_csv_row(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc="Not Set"):
+def build_csv_row(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc=None):
     """One row for CSV_FILE: raw values, empty cell for a missing reading."""
     up, load = parse_uptime(t["uptime"])
     volts = None if t["voltage_mv"] is None else round(t["voltage_mv"] / 1000, 3)
     batt = None if t["battery_pct"] is None else round(t["battery_pct"] / 100, 1)
     # Links vary in count per poll, so they stay one field instead of ragged columns.
     links = ";".join(f"{s}>{d}:{'' if snr is None else snr}" for s, d, snr in t["links"])
+    tc = tc or {}
     row = [timestamp, t["temperature_c"], volts, t["tx_power_dbm"], t["tx_power_mw"],
            batt, t["freq_mhz"], t["bw_mhz"], t["mcs"], t["max_speed_mph"],
-           t["noise_dbm"], up, load, links, ipcomm1, ipcomm2, tc, int(tx_idle)]
+           t["noise_dbm"], up, load, links, ipcomm1, ipcomm2,
+           *(tc.get(ch) for ch in range(4)), int(tx_idle)]
     return ["" if v is None else v for v in row]
 
 
@@ -793,10 +836,10 @@ def selftest():
 
     # 0 counts sits at the type's b offset; the extremes are the documented
     # measurement range for that type (K: -180 to 1360 C).
-    assert decode_tc_scan(scan(0), 'K') == 586
-    assert round(decode_tc_scan(scan(-8191), 'K')) == -200
-    assert round(decode_tc_scan(scan(8190), 'K')) == 1372
-    assert round(decode_tc_scan(scan(-5878), 'K'), 1) == 22.0   # room temperature
+    assert decode_tc_scan(scan(0), 'K') == [586]
+    assert round(decode_tc_scan(scan(-8191), 'K')[0]) == -200
+    assert round(decode_tc_scan(scan(8190), 'K')[0]) == 1372
+    assert round(decode_tc_scan(scan(-5878), 'K')[0], 1) == 22.0   # room temperature
     # Agree bit-for-bit with DATAQ's own 245SimpleTest2.py, which assembles a
     # scan as (b1>>1) + ((b2&254)<<6), shifts left 2 and subtracts 32768.
     # Skips the two raw values reserved as fault sentinels.
@@ -804,16 +847,37 @@ def selftest():
         b1, b2 = (raw & 0x7F) << 1, (((raw >> 7) & 0x7F) << 1) | 1
         dataq_counts = ((((b1 >> 1) + ((b2 & 254) << 6)) << 2) - 32768) // 4
         m, b = TC_TYPES['J'][1:]
-        assert decode_tc_scan(bytes([b1, b2]), 'J') == m * dataq_counts + b
+        assert decode_tc_scan(bytes([b1, b2]), 'J') == [m * dataq_counts + b]
 
-    assert decode_tc_scan(scan(8191), 'K') == "CJC Error"
-    assert decode_tc_scan(scan(-8192), 'K') == "TC Open"
+    assert decode_tc_scan(scan(8191), 'K') == ["CJC Error"]
+    assert decode_tc_scan(scan(-8192), 'K') == ["TC Open"]
     # Echoed command bytes have their LSB set, so they cannot start a scan, and
     # the freshest complete scan wins over an older one.
     assert decode_tc_scan(b'S1' + scan(0) + scan(-5878), 'K') == \
         decode_tc_scan(scan(-5878), 'K')
     assert decode_tc_scan(b'S1', 'K') is None
     assert decode_tc_scan(b'', 'K') is None
+
+    # Two channels: one scan is four bytes, sync bit clear only on the first.
+    def scan2(a, b_):
+        return bytes([scan(a)[0], scan(a)[1] | 1, scan(b_)[0] | 1, scan(b_)[1] | 1])
+
+    two = decode_tc_scan(scan2(-5878, 0), 'K', 2)
+    assert [round(v, 1) for v in two] == [22.0, 586.0]
+    # A partial trailing scan is skipped for the last complete one behind it.
+    assert decode_tc_scan(scan2(-5878, 0) + scan2(0, 0)[:2], 'K', 2) == two
+    assert decode_tc_scan(scan(0), 'K', 2) is None
+    # Channel order follows the scan list, so a 4-byte read is not two 1-channel
+    # scans: decoding with the wrong count must not silently succeed.
+    assert decode_tc_scan(scan2(-5878, 0)[1:], 'K', 2) is None
+
+    assert as_c(47) == 47 and as_c("47.0°C") == 47.0
+    assert as_c("Not Set") is None and as_c("TC Open") is None and as_c(None) is None
+    assert hottest({"radio": 70, "TC CH1": "91.0°C"}) == ("TC CH1", 91.0)
+    assert hottest({"radio": 70, "TC CH1": "TC Open"}) == ("radio", 70)
+
+    assert tc_summary(None) == "Not Set"
+    assert tc_summary({1: "24.0°C", 0: "22.3°C"}) == "CH1 22.3°C   CH2 24.0°C"
     assert parse_uptime("10:00:00 up 5 min, 1 user, load average: 0.10, 0.20, 0.30") \
         == ("5 min", 0.10)
     assert parse_uptime(None) == (None, None)
@@ -849,7 +913,7 @@ def selftest():
              "links": [("22103", "41238", 34.0)]}
     for w in (64, 80, 100):
         out = build_panel("2026-08-28 14:03:12", "172.20.4.31", telem, 85,
-                          "33.0°C", "Not Set", w)
+                          "33.0°C", "Not Set", w, tc={0: "22.3°C", 1: "24.0°C"})
         for line in out.split('\n'):
             assert visible_len(line) == w, (w, visible_len(line), line)
 
@@ -866,8 +930,12 @@ def selftest():
         assert visible_len(line) == 80, (visible_len(line), line)
     assert "FORCED IDLE" in idle_panel
 
-    row = build_csv_row("2026-08-28 14:03:12", telem, "33.0°C", "Not Set")
+    row = build_csv_row("2026-08-28 14:03:12", telem, "33.0°C", "Not Set",
+                        tc={0: "22.3°C", 3: "TC Open"})
     assert len(row) == len(CSV_FIELDS)
+    assert row[CSV_FIELDS.index("tc1")] == "22.3°C"
+    assert row[CSV_FIELDS.index("tc2")] == ""
+    assert row[CSV_FIELDS.index("tc4")] == "TC Open"
     assert row[CSV_FIELDS.index("voltage_v")] == 12.197
     assert row[CSV_FIELDS.index("battery_pct")] == 65.0
     assert row[CSV_FIELDS.index("links")] == "22103>41238:34.0"
@@ -921,15 +989,15 @@ def main():
         telemetry = silvus.get_all_telemetry()
         ipcomm1_temp = get_board_temp(IPCOMM1_URL, label="IPCOMM1")
         ipcomm2_temp = get_board_temp(IPCOMM2_URL, label="IPCOMM2")
-        tc_temp = get_tc_temp(DATAQ_PORT, DATAQ_CHANNEL, DATAQ_TC_TYPE,
-                              DATAQ_OFFSET_C)
+        tc_temps = get_tc_temps(DATAQ_PORT, DATAQ_CHANNELS, DATAQ_TC_TYPE,
+                                DATAQ_OFFSET_C)
 
         if THERMAL_IDLE:
             hot_src, hot_c = hottest({
                 "radio": telemetry["temperature_c"],
                 "IPCOMM1": ipcomm1_temp,
                 "IPCOMM2": ipcomm2_temp,
-                "thermocouple": tc_temp,
+                **{f"TC CH{ch + 1}": v for ch, v in tc_temps.items()},
             })
             want = thermal_action(hot_c, tx_idle, trip_c, resume_c)
             if want is not None:
@@ -942,15 +1010,15 @@ def main():
                     log.error(f"Thermal idle: failed to set tx_fifo_disable={int(want)}")
 
         log_entry = build_log_entry(timestamp, telemetry, ipcomm1_temp, ipcomm2_temp,
-                                    tx_idle, tc_temp)
+                                    tx_idle, tc_temps)
         with open(OUTPUT_FILE, "a") as f:
             f.write(log_entry)
         append_csv_row(CSV_FILE, build_csv_row(timestamp, telemetry, ipcomm1_temp,
-                                               ipcomm2_temp, tx_idle, tc_temp))
+                                               ipcomm2_temp, tx_idle, tc_temps))
 
         if interactive:
             panel = build_panel(timestamp, SILVUS_IP, telemetry, max_threshold,
-                                ipcomm1_temp, ipcomm2_temp, width, tx_idle, tc_temp)
+                                ipcomm1_temp, ipcomm2_temp, width, tx_idle, tc_temps)
             # Home the cursor and clear, so the panel updates in place.
             sys.stdout.write('\033[H\033[J' + panel + '\n')
             sys.stdout.write(f"{DIM}every {INTERVAL_SECONDS}s → {OUTPUT_FILE}   csv → {CSV_FILE}"
@@ -970,7 +1038,8 @@ if __name__ == '__main__':
     elif '--dataq' in sys.argv:
         # One reading and quit, for checking the probe and the port without
         # waiting out a poll. Failures land in the debug log as usual.
-        print(get_tc_temp(DATAQ_PORT, DATAQ_CHANNEL, DATAQ_TC_TYPE, DATAQ_OFFSET_C))
+        print(tc_summary(get_tc_temps(DATAQ_PORT, DATAQ_CHANNELS, DATAQ_TC_TYPE,
+                                      DATAQ_OFFSET_C)))
     else:
         try:
             main()
