@@ -20,8 +20,9 @@ uv venv && uv pip install -r requirements.txt
 `pyserial` is only needed for the DI-245; without it that reading shows
 `No pyserial` and the rest carries on.
 
-Edit `config.py` — radio IP, credentials, IPCOMM URL. It is gitignored, so it
-survives pulls.
+Edit `config.py` — radio IP, credentials, and up to two IPCOMM board URLs
+(leave unused ones empty; the radio itself is `SILVUS_IP`, not an IPCOMM). It
+is gitignored, so it survives pulls.
 
 ## Run
 
@@ -102,9 +103,10 @@ Three files next to the script:
 | Debug log | `temp_test.txt.debug` | `SILVUS_DEBUG_LOG` |
 
 CSV appends raw values, empty cells for missing readings. Links share one
-`links` column, `src>dst:snr` joined by `;`. `tc1`-`tc4` are the DI-245 inputs,
-empty for the ones you do not use. `tx_idle` is 1 while the cutout holds
-transmit off.
+`links` column, `src>dst:snr` joined by `;`. `ipcomm1` and `ipcomm2` are the
+IPCOMM board temperatures, `Not Set` for an unconfigured URL. `tc1`-`tc4` are
+the DI-245 inputs, empty for the ones you do not use. `tx_idle` is 1 while the
+cutout holds transmit off.
 
 ## When a reading is N/A
 

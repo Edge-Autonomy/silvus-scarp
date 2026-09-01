@@ -23,7 +23,9 @@ CSV_FILE = os.environ.get('SILVUS_CSV_FILE',
 INTERVAL_SECONDS = 60
 
 SILVUS_IP = 'XXX'
-IPCOMM1_URL = 'XXX'
+# IPCOMM boards only. The radio's own temperature comes from the API, not
+# from scraping a board page.
+IPCOMM1_URL = ''
 IPCOMM2_URL = ''
 
 # FIPS mode enforces: HTTPS only, login authentication required, SSH disabled.
@@ -45,7 +47,7 @@ IDLE_TEMP_C = None
 IDLE_RESUME_C = None
 
 # DATAQ DI-245 thermocouple, read once per poll. Empty port disables it, the
-# same way an empty IPCOMM2_URL does. Needs pyserial.
+# same way an empty IPCOMM URL does. Needs pyserial.
 DATAQ_PORT = ''
 # One entry per probe, read in the same scan. 0-3; the silkscreen says 1-4.
 DATAQ_CHANNELS = [0, 1]
@@ -61,6 +63,10 @@ try:
     from config import *  # noqa: F401,F403
 except ImportError:
     pass
+
+# One list, so the poll, the log line, the CSV row and the panel all walk the
+# same thing. An empty URL reads "Not Set" and the cutout skips it.
+IPCOMM_URLS = [IPCOMM1_URL, IPCOMM2_URL]
 
 # The live panel owns the terminal, so debug chatter has to go somewhere else.
 # Logs land next to OUTPUT_FILE; tail it in a second terminal when debugging.
@@ -379,7 +385,7 @@ def hottest(temps):
     """(label, temp_c) of the hottest reading in {label: temp_c}, ignoring None.
 
     (None, None) if nothing read. An absent or failed sensor is simply not
-    counted -- an unwired IPCOMM2 must not hold the cutout on forever.
+    counted -- an unwired IPCOMM must not hold the cutout on forever.
     """
     have = [(c, k) for k, v in temps.items() if (c := as_c(v)) is not None]
     if not have:
@@ -498,7 +504,7 @@ def tc_summary(tc):
     return "   ".join(f"CH{ch + 1} {v}" for ch, v in sorted(tc.items()))
 
 
-def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width,
+def build_panel(timestamp, ip, t, max_threshold, ipcomms, width,
                 tx_idle=False, tc=None):
     p = Panel(width)
     p.rule(f"{BOLD}Silvus {ip}{RESET}  {DIM}{timestamp}{RESET}", top=True)
@@ -544,7 +550,7 @@ def build_panel(timestamp, ip, t, max_threshold, ipcomm1, ipcomm2, width,
         p.row("", paint("no active links", DIM))
 
     p.rule("IPCOMM")
-    p.row("", f"1: {ipcomm1:<14} 2: {ipcomm2}")
+    p.row("", "  ".join(f"{i + 1}: {v:<11}" for i, v in enumerate(ipcomms)).rstrip())
 
     p.rule("Thermocouples (DI-245)")
     p.row("", tc_summary(tc))
@@ -745,7 +751,7 @@ def get_tc_temps(port, channels, tc_type, offset_c=0.0, label="DATAQ"):
         # surface as OSError too, and a dead probe must not kill the poll loop.
         log.error(f"{label}: {type(e).__name__}: {e}")
         return every("Fetch Error")
-def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc=None):
+def build_log_entry(timestamp, t, ipcomms, tx_idle=False, tc=None):
     """One plain-text line for OUTPUT_FILE (no colour, no box)."""
     def plain(value, spec="", suffix="", scale=1.0):
         if value is None:
@@ -773,7 +779,7 @@ def build_log_entry(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc=None):
         f"Links:{links} "
         f"{'TX:IDLE(thermal) ' if tx_idle else ''}| "
         f"TC: {tc_summary(tc)} | "
-        f"IPCOMM1: {ipcomm1} | IPCOMM2: {ipcomm2}\n"
+        + " | ".join(f"IPCOMM{i + 1}: {v}" for i, v in enumerate(ipcomms)) + "\n"
     )
 
 
@@ -787,7 +793,7 @@ CSV_FIELDS = [
 ]
 
 
-def build_csv_row(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc=None):
+def build_csv_row(timestamp, t, ipcomms, tx_idle=False, tc=None):
     """One row for CSV_FILE: raw values, empty cell for a missing reading."""
     up, load = parse_uptime(t["uptime"])
     volts = None if t["voltage_mv"] is None else round(t["voltage_mv"] / 1000, 3)
@@ -797,7 +803,7 @@ def build_csv_row(timestamp, t, ipcomm1, ipcomm2, tx_idle=False, tc=None):
     tc = tc or {}
     row = [timestamp, t["temperature_c"], volts, t["tx_power_dbm"], t["tx_power_mw"],
            batt, t["freq_mhz"], t["bw_mhz"], t["mcs"], t["max_speed_mph"],
-           t["noise_dbm"], up, load, links, ipcomm1, ipcomm2,
+           t["noise_dbm"], up, load, links, *ipcomms,
            *(tc.get(ch) for ch in range(4)), int(tx_idle)]
     return ["" if v is None else v for v in row]
 
@@ -913,24 +919,27 @@ def selftest():
              "links": [("22103", "41238", 34.0)]}
     for w in (64, 80, 100):
         out = build_panel("2026-08-28 14:03:12", "172.20.4.31", telem, 85,
-                          "33.0°C", "Not Set", w, tc={0: "22.3°C", 1: "24.0°C"})
+                          ["33.0°C", "Not Set"], w,
+                          tc={0: "22.3°C", 1: "24.0°C"})
         for line in out.split('\n'):
             assert visible_len(line) == w, (w, visible_len(line), line)
 
     # Missing readings must not crash either renderer.
     empty = {k: None for k in telem}
     empty["links"] = []
-    build_panel("2026-08-28 14:03:12", "1.2.3.4", empty, None, "N/A", "N/A", 80)
-    assert "N/A" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
-    assert "Links:none" in build_log_entry("2026-08-28 14:03:12", empty, "N/A", "N/A")
+    na = ["N/A", "N/A"]
+    build_panel("2026-08-28 14:03:12", "1.2.3.4", empty, None, na, 80)
+    assert "IPCOMM2: N/A" in build_log_entry("2026-08-28 14:03:12", empty, na)
+    assert "Links:none" in build_log_entry("2026-08-28 14:03:12", empty, na)
 
     idle_panel = build_panel("2026-08-28 14:03:12", "172.20.4.31", telem, 85,
-                             "33.0°C", "Not Set", 80, tx_idle=True)
+                             ["33.0°C", "Not Set"], 80, tx_idle=True)
     for line in idle_panel.split('\n'):
         assert visible_len(line) == 80, (visible_len(line), line)
     assert "FORCED IDLE" in idle_panel
 
-    row = build_csv_row("2026-08-28 14:03:12", telem, "33.0°C", "Not Set",
+    row = build_csv_row("2026-08-28 14:03:12", telem,
+                        ["33.0°C", "Not Set"],
                         tc={0: "22.3°C", 3: "TC Open"})
     assert len(row) == len(CSV_FIELDS)
     assert row[CSV_FIELDS.index("tc1")] == "22.3°C"
@@ -940,9 +949,9 @@ def selftest():
     assert row[CSV_FIELDS.index("battery_pct")] == 65.0
     assert row[CSV_FIELDS.index("links")] == "22103>41238:34.0"
     assert row[CSV_FIELDS.index("tx_idle")] == 0
-    assert build_csv_row("2026-08-28 14:03:12", telem, "a", "b",
+    assert build_csv_row("2026-08-28 14:03:12", telem, ["a", "b"],
                          tx_idle=True)[CSV_FIELDS.index("tx_idle")] == 1
-    empty_row = build_csv_row("2026-08-28 14:03:12", empty, "N/A", "N/A")
+    empty_row = build_csv_row("2026-08-28 14:03:12", empty, na)
     assert len(empty_row) == len(CSV_FIELDS)
     assert empty_row[CSV_FIELDS.index("temperature_c")] == ""
 
@@ -987,16 +996,15 @@ def main():
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         telemetry = silvus.get_all_telemetry()
-        ipcomm1_temp = get_board_temp(IPCOMM1_URL, label="IPCOMM1")
-        ipcomm2_temp = get_board_temp(IPCOMM2_URL, label="IPCOMM2")
+        ipcomm_temps = [get_board_temp(u, label=f"IPCOMM{i + 1}")
+                        for i, u in enumerate(IPCOMM_URLS)]
         tc_temps = get_tc_temps(DATAQ_PORT, DATAQ_CHANNELS, DATAQ_TC_TYPE,
                                 DATAQ_OFFSET_C)
 
         if THERMAL_IDLE:
             hot_src, hot_c = hottest({
                 "radio": telemetry["temperature_c"],
-                "IPCOMM1": ipcomm1_temp,
-                "IPCOMM2": ipcomm2_temp,
+                **{f"IPCOMM{i + 1}": v for i, v in enumerate(ipcomm_temps)},
                 **{f"TC CH{ch + 1}": v for ch, v in tc_temps.items()},
             })
             want = thermal_action(hot_c, tx_idle, trip_c, resume_c)
@@ -1009,16 +1017,16 @@ def main():
                 else:
                     log.error(f"Thermal idle: failed to set tx_fifo_disable={int(want)}")
 
-        log_entry = build_log_entry(timestamp, telemetry, ipcomm1_temp, ipcomm2_temp,
+        log_entry = build_log_entry(timestamp, telemetry, ipcomm_temps,
                                     tx_idle, tc_temps)
         with open(OUTPUT_FILE, "a") as f:
             f.write(log_entry)
-        append_csv_row(CSV_FILE, build_csv_row(timestamp, telemetry, ipcomm1_temp,
-                                               ipcomm2_temp, tx_idle, tc_temps))
+        append_csv_row(CSV_FILE, build_csv_row(timestamp, telemetry, ipcomm_temps,
+                                               tx_idle, tc_temps))
 
         if interactive:
             panel = build_panel(timestamp, SILVUS_IP, telemetry, max_threshold,
-                                ipcomm1_temp, ipcomm2_temp, width, tx_idle, tc_temps)
+                                ipcomm_temps, width, tx_idle, tc_temps)
             # Home the cursor and clear, so the panel updates in place.
             sys.stdout.write('\033[H\033[J' + panel + '\n')
             sys.stdout.write(f"{DIM}every {INTERVAL_SECONDS}s → {OUTPUT_FILE}   csv → {CSV_FILE}"
